@@ -406,17 +406,37 @@ async def cmd_debug_odds(msg: Message):
     if not cfg.odds_api_key:
         await msg.answer("❌ ODDS_API_KEY не задан")
         return
-    await msg.answer("🔍 Делаю запрос к odds-api.io...")
+    import json
+    from src.data.odds_api import OddsApiClient
+    client = OddsApiClient(cfg.odds_api_key)
     try:
-        from src.data.odds_api import OddsApiClient, SPORT
-        import json
-        client = OddsApiClient(cfg.odds_api_key)
-        data = await client._get("/events", {"sport": SPORT, "league": "baseball_mlb", "limit": 5})
-        preview = json.dumps(data)[:1000]
-        await msg.answer(f"<pre>{preview}</pre>", parse_mode="HTML")
+        # 1. Попробуем /sports чтобы найти правильный slug для бейсбола
+        await msg.answer("🔍 Запрашиваю список видов спорта...")
+        try:
+            sports = await client._get("/sports", {})
+            text = json.dumps(sports)[:1200]
+            await msg.answer(f"<b>/sports:</b>\n<pre>{text}</pre>", parse_mode="HTML")
+        except Exception as e:
+            await msg.answer(f"/sports ошибка: {e}")
+
+        # 2. Попробуем /events без фильтра по лиге
+        await msg.answer("🔍 Запрашиваю /events без league фильтра (baseball)...")
+        try:
+            data = await client._get("/events", {"sport": "baseball", "limit": 3})
+            text = json.dumps(data)[:1200]
+            await msg.answer(f"<b>/events sport=baseball:</b>\n<pre>{text}</pre>", parse_mode="HTML")
+        except Exception as e:
+            await msg.answer(f"/events baseball ошибка: {e}")
+
+        # 3. Попробуем с sport=mlb
+        try:
+            data2 = await client._get("/events", {"sport": "mlb", "limit": 3})
+            text2 = json.dumps(data2)[:800]
+            await msg.answer(f"<b>/events sport=mlb:</b>\n<pre>{text2}</pre>", parse_mode="HTML")
+        except Exception as e:
+            await msg.answer(f"/events mlb ошибка: {e}")
+    finally:
         await client.close()
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка: {e}")
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
