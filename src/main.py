@@ -39,8 +39,6 @@ async def _warmup(bot: Bot) -> None:
 
 
 async def _on_startup(bot: Bot) -> None:
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook deleted, using polling")
     await init_db()
     logger.info("DB initialized")
     asyncio.create_task(_warmup(bot))
@@ -51,6 +49,8 @@ async def main() -> None:
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook cleared — starting polling")
     dp = Dispatcher()
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
