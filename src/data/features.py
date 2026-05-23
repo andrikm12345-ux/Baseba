@@ -34,7 +34,25 @@ FEATURE_COLUMNS = [
     "h2h_away_avg_runs",
     "h2h_recency_winrate",
     "rest_diff",
+    # Starting pitcher features (None → filled with league averages)
+    "home_pitcher_era",
+    "away_pitcher_era",
+    "era_diff",
+    "home_pitcher_whip",
+    "away_pitcher_whip",
+    "whip_diff",
+    "home_pitcher_k9",
+    "away_pitcher_k9",
+    "home_pitcher_bb9",
+    "away_pitcher_bb9",
+    "pitcher_known",  # 1 if both pitchers known, 0 otherwise
 ]
+
+# League-average fallback values when pitcher is unknown
+_ERA_AVG = 4.20
+_WHIP_AVG = 1.30
+_K9_AVG = 8.80
+_BB9_AVG = 3.10
 
 
 def _h2h_features(h2h_list: Deque[Tuple[int, int]], home_id: int, key_first_id: int) -> Dict[str, float]:
@@ -137,6 +155,18 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
         h2h_list = h2h[key]
         h2h_feats = _h2h_features(h2h_list, home_id, key[0])
 
+        home_era = float(row["home_pitcher_era"]) if pd.notna(row.get("home_pitcher_era")) else _ERA_AVG
+        away_era = float(row["away_pitcher_era"]) if pd.notna(row.get("away_pitcher_era")) else _ERA_AVG
+        home_whip = float(row["home_pitcher_whip"]) if pd.notna(row.get("home_pitcher_whip")) else _WHIP_AVG
+        away_whip = float(row["away_pitcher_whip"]) if pd.notna(row.get("away_pitcher_whip")) else _WHIP_AVG
+        home_k9 = float(row["home_pitcher_k9"]) if pd.notna(row.get("home_pitcher_k9")) else _K9_AVG
+        away_k9 = float(row["away_pitcher_k9"]) if pd.notna(row.get("away_pitcher_k9")) else _K9_AVG
+        home_bb9 = float(row["home_pitcher_bb9"]) if pd.notna(row.get("home_pitcher_bb9")) else _BB9_AVG
+        away_bb9 = float(row["away_pitcher_bb9"]) if pd.notna(row.get("away_pitcher_bb9")) else _BB9_AVG
+        pitcher_known = float(
+            pd.notna(row.get("home_pitcher_era")) and pd.notna(row.get("away_pitcher_era"))
+        )
+
         feat = {
             "elo_diff": h.elo - a.elo,
             "home_elo": h.elo,
@@ -153,6 +183,17 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
             "away_ra_away_avg": _avg(a.last_away, 1, 4.5),
             **h2h_feats,
             "rest_diff": rest_h - rest_a,
+            "home_pitcher_era": home_era,
+            "away_pitcher_era": away_era,
+            "era_diff": home_era - away_era,
+            "home_pitcher_whip": home_whip,
+            "away_pitcher_whip": away_whip,
+            "whip_diff": home_whip - away_whip,
+            "home_pitcher_k9": home_k9,
+            "away_pitcher_k9": away_k9,
+            "home_pitcher_bb9": home_bb9,
+            "away_pitcher_bb9": away_bb9,
+            "pitcher_known": pitcher_known,
         }
 
         if pd.notna(row.get("home_runs")) and pd.notna(row.get("away_runs")):
@@ -212,6 +253,18 @@ def build_inference_features(
         h2h_list = h2h[key]
         h2h_feats = _h2h_features(h2h_list, home_id, key[0])
 
+        home_era = float(row["home_pitcher_era"]) if pd.notna(row.get("home_pitcher_era")) else _ERA_AVG
+        away_era = float(row["away_pitcher_era"]) if pd.notna(row.get("away_pitcher_era")) else _ERA_AVG
+        home_whip = float(row["home_pitcher_whip"]) if pd.notna(row.get("home_pitcher_whip")) else _WHIP_AVG
+        away_whip = float(row["away_pitcher_whip"]) if pd.notna(row.get("away_pitcher_whip")) else _WHIP_AVG
+        home_k9 = float(row["home_pitcher_k9"]) if pd.notna(row.get("home_pitcher_k9")) else _K9_AVG
+        away_k9 = float(row["away_pitcher_k9"]) if pd.notna(row.get("away_pitcher_k9")) else _K9_AVG
+        home_bb9 = float(row["home_pitcher_bb9"]) if pd.notna(row.get("home_pitcher_bb9")) else _BB9_AVG
+        away_bb9 = float(row["away_pitcher_bb9"]) if pd.notna(row.get("away_pitcher_bb9")) else _BB9_AVG
+        pitcher_known = float(
+            pd.notna(row.get("home_pitcher_era")) and pd.notna(row.get("away_pitcher_era"))
+        )
+
         feat = {
             "match_id": int(row["id"]),
             "elo_diff": h.elo - a.elo,
@@ -229,6 +282,17 @@ def build_inference_features(
             "away_ra_away_avg": _avg(a.last_away, 1, 4.5),
             **h2h_feats,
             "rest_diff": rest_h - rest_a,
+            "home_pitcher_era": home_era,
+            "away_pitcher_era": away_era,
+            "era_diff": home_era - away_era,
+            "home_pitcher_whip": home_whip,
+            "away_pitcher_whip": away_whip,
+            "whip_diff": home_whip - away_whip,
+            "home_pitcher_k9": home_k9,
+            "away_pitcher_k9": away_k9,
+            "home_pitcher_bb9": home_bb9,
+            "away_pitcher_bb9": away_bb9,
+            "pitcher_known": pitcher_known,
         }
         rows.append(feat)
 

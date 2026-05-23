@@ -31,6 +31,28 @@ def _msk(dt: datetime) -> str:
     return dt.astimezone(MSK).strftime("%d.%m %H:%M МСК")
 
 
+def _fmt_pitcher_line(match: Match) -> Optional[str]:
+    """Returns a one-line pitcher matchup string if data is available."""
+    hp = match.home_pitcher_name
+    ap = match.away_pitcher_name
+    if not hp and not ap:
+        return None
+    parts = []
+    if hp:
+        era = f" ERA {match.home_pitcher_era:.2f}" if match.home_pitcher_era else ""
+        whip = f" WHIP {match.home_pitcher_whip:.2f}" if match.home_pitcher_whip else ""
+        parts.append(f"{hp}{era}{whip}")
+    else:
+        parts.append("неизвестен")
+    if ap:
+        era = f" ERA {match.away_pitcher_era:.2f}" if match.away_pitcher_era else ""
+        whip = f" WHIP {match.away_pitcher_whip:.2f}" if match.away_pitcher_whip else ""
+        parts.append(f"{ap}{era}{whip}")
+    else:
+        parts.append("неизвестен")
+    return f"⚾ Питчеры: {parts[0]} / {parts[1]}"
+
+
 def format_signal(
     signal: Signal,
     match: Match,
@@ -52,6 +74,11 @@ def format_signal(
         f"",
         f"⚾ <b>{home_name}</b> vs <b>{away_name}</b>",
         f"🕐 {kickoff}  |  MLB",
+    ]
+    pitcher_line = _fmt_pitcher_line(match)
+    if pitcher_line:
+        lines.append(pitcher_line)
+    lines += [
         f"",
         f"<b>Рынок:</b> {market_label}",
         f"<b>Прогноз:</b> {pick_label}",

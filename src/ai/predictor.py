@@ -59,31 +59,36 @@ _PROMPT = """Ты — элитный бейсбольный аналитик MLB
 ЦЕЛЬ: найти РАСХОЖДЕНИЕ между истинной вероятностью и рыночной линией в игре {home} vs {away}.
 
 АЛГОРИТМ (7 ступеней):
-1. СТАРТОВЫЕ ПИТЧЕРЫ: ERA, WHIP, K/9, BB/9, FIP за сезон и последние 5 стартов. Против текущего оппонента H2H.
-2. БУЛЛПЕН: ERA/WHIP последних 7 дней. Количество дней отдыха ключевых бросающих. Стрейк использования.
-3. АТАКА: OPS, wRC+, K%, BB% обеих линий. Home/Away splits (для хозяев vs гостей).
-4. ФАКТОР ПАРКА И ПОГОДА: Park Factor стадиона (нейтральный=100). Ветер (скорость, направление) влияет на тотал ±1-2 рана. Температура.
-5. H2H И ФОРМА: последние 2 сезона H2H. Текущий стрейк (W/L серия). Wins Last 10 games.
+1. СТАРТОВЫЕ ПИТЧЕРЫ: используй данные ниже как основу. Дополни из веб-поиска (последние 3 старта, статус здоровья, matchup splits).
+2. БУЛЛПЕН: ERA/WHIP последних 7 дней. Количество дней отдыха. Перегруженность после длинной серии.
+3. АТАКА: OPS, wRC+, K%, BB% обеих линий против питчеров данного типа (правша/левша).
+4. ФАКТОР ПАРКА И ПОГОДА: Park Factor стадиона. Ветер влияет на тотал ±1-2 рана. Температура <10°C снижает тотал.
+5. H2H И ФОРМА: последние 2 сезона H2H. Текущая серия W/L. Wins Last 10 games.
 6. РЫНОЧНЫЙ АНАЛИЗ: убери маржу букмекера. Сравни с XGBoost. Найди расхождение ≥5%.
 7. ИТОГ: определи лучший рынок (ML/TOTAL/RL) с наибольшим edge.
 
-ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost, Elo-based):
+ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost + Elo):
 P(победа хозяев) = {p_home:.0%}, P(победа гостей) = {p_away:.0%}
 P(тотал > {total_line}) = {p_over85:.0%}
 P(хозяева закроют ран-лайн -{rl_line}) = {p_rl_home:.0%}
 
-ИСТОРИЧЕСКИЙ КОНТЕКСТ:
-Elo {home} = {home_elo:.0f}, Elo {away} = {away_elo:.0f}
-Win Rate (10 игр): {home} {home_win_rate:.0%}, {away} {away_win_rate:.0%}
-Средние раны (атака/питчинг): {home} {home_rs_avg:.1f}/{home_ra_avg:.1f}, {away} {away_rs_avg:.1f}/{away_ra_avg:.1f}
+СТАРТОВЫЕ ПИТЧЕРЫ (сезонная статистика):
+{home}: {home_pitcher_name} | ERA {home_era} | WHIP {home_whip} | K/9 {home_k9} | BB/9 {home_bb9}
+{away}: {away_pitcher_name} | ERA {away_era} | WHIP {away_whip} | K/9 {away_k9} | BB/9 {away_bb9}
+ERA diff (хозяева−гости): {era_diff:+.2f} | Данные питчеров: {pitcher_known}
+
+КОМАНДНАЯ СТАТИСТИКА (скользящие 10 игр):
+Elo: {home} {home_elo:.0f} vs {away} {away_elo:.0f}
+Win Rate: {home} {home_win_rate:.0%} vs {away} {away_win_rate:.0%}
+Раны scored/allowed: {home} {home_rs_avg:.1f}/{home_ra_avg:.1f}, {away} {away_rs_avg:.1f}/{away_ra_avg:.1f}
 
 СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
 {web_block}
 
-ЗАДАЧА: пройди все 7 ступеней. Сформируй СВОИ независимые вероятности. Если данных нет — используй базовые распределения MLB (P(home win)≈0.54).
+ЗАДАЧА: пройди все 7 ступеней. Питчеры — главный фактор. Сформируй СВОИ независимые вероятности.
 
 Верни СТРОГО JSON без markdown:
-{{"p_home": float, "p_away": float, "p_over85": float, "p_rl_home": float, "reasoning": "1-2 предложения с главным аргументом и расхождением"}}"""
+{{"p_home": float, "p_away": float, "p_over85": float, "p_rl_home": float, "reasoning": "1-2 предложения с главным аргументом (ERA/WHIP питчеров + ключевое расхождение)"}}"""
 
 
 def _format_web(results: list[dict]) -> str:
@@ -160,6 +165,14 @@ async def ai_predict(
     web_results = await tavily_search(
         f"{home} vs {away} pitcher lineup injury MLB", days=5
     )
+    def _fmt_stat(v, fmt=".2f", unknown="н/д"):
+        return format(v, fmt) if v is not None else unknown
+
+    home_era = features.get("home_pitcher_era")
+    away_era = features.get("away_pitcher_era")
+    era_diff = (home_era - away_era) if (home_era is not None and away_era is not None) else 0.0
+    pitcher_known_str = "✅ оба известны" if features.get("pitcher_known", 0) == 1.0 else "⚠️ частично/неизвестны"
+
     prompt = _PROMPT.format(
         home=home,
         away=away,
@@ -169,6 +182,18 @@ async def ai_predict(
         p_away=ml_probs.get("p_away", 0.46),
         p_over85=ml_probs.get("p_over85", 0.5),
         p_rl_home=ml_probs.get("p_rl_home", 0.4),
+        home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
+        home_era=_fmt_stat(home_era),
+        home_whip=_fmt_stat(features.get("home_pitcher_whip")),
+        home_k9=_fmt_stat(features.get("home_pitcher_k9")),
+        home_bb9=_fmt_stat(features.get("home_pitcher_bb9")),
+        away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
+        away_era=_fmt_stat(away_era),
+        away_whip=_fmt_stat(features.get("away_pitcher_whip")),
+        away_k9=_fmt_stat(features.get("away_pitcher_k9")),
+        away_bb9=_fmt_stat(features.get("away_pitcher_bb9")),
+        era_diff=era_diff,
+        pitcher_known=pitcher_known_str,
         home_elo=features.get("home_elo", 1500),
         away_elo=features.get("away_elo", 1500),
         home_win_rate=features.get("home_win_rate", 0.5),

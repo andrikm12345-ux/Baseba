@@ -65,6 +65,19 @@ class Match(Base):
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
     home_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     away_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Probable starting pitchers
+    home_pitcher_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    home_pitcher_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    home_pitcher_era: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    home_pitcher_whip: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    home_pitcher_k9: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    home_pitcher_bb9: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    away_pitcher_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    away_pitcher_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    away_pitcher_era: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    away_pitcher_whip: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    away_pitcher_k9: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    away_pitcher_bb9: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     home_team = relationship("Team", foreign_keys=[home_team_id])
     away_team = relationship("Team", foreign_keys=[away_team_id])
@@ -165,3 +178,25 @@ async def init_db() -> None:
                 logger.warning(f"Amnesty: restored access for {result.rowcount} users (notifications off)")
         except Exception as e:
             logger.warning(f"amnesty UPDATE skipped: {e}")
+        # Pitcher columns migration
+        pitcher_cols = [
+            ("home_pitcher_id", "INTEGER"),
+            ("home_pitcher_name", "VARCHAR(128)"),
+            ("home_pitcher_era", "FLOAT"),
+            ("home_pitcher_whip", "FLOAT"),
+            ("home_pitcher_k9", "FLOAT"),
+            ("home_pitcher_bb9", "FLOAT"),
+            ("away_pitcher_id", "INTEGER"),
+            ("away_pitcher_name", "VARCHAR(128)"),
+            ("away_pitcher_era", "FLOAT"),
+            ("away_pitcher_whip", "FLOAT"),
+            ("away_pitcher_k9", "FLOAT"),
+            ("away_pitcher_bb9", "FLOAT"),
+        ]
+        for col, col_type in pitcher_cols:
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE matches ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                ))
+            except Exception as e:
+                logger.warning(f"pitcher column {col} migration skipped: {e}")

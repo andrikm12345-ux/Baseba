@@ -14,7 +14,7 @@ from src.data.features import (
 from collections import deque
 
 
-def _make_games(n: int = 50) -> pd.DataFrame:
+def _make_games(n: int = 50, with_pitchers: bool = False) -> pd.DataFrame:
     """Generate synthetic MLB game data."""
     rng = np.random.default_rng(42)
     base = datetime(2024, 4, 1)
@@ -26,7 +26,7 @@ def _make_games(n: int = 50) -> pd.DataFrame:
             away_id = rng.integers(1, 5)
         home_runs = int(rng.poisson(4.3))
         away_runs = int(rng.poisson(4.3))
-        records.append({
+        row = {
             "id": i + 1,
             "utc_date": base + timedelta(days=i // 3),
             "home_team_id": int(home_id),
@@ -35,16 +35,53 @@ def _make_games(n: int = 50) -> pd.DataFrame:
             "away_runs": away_runs,
             "status": "FINISHED",
             "competition": "mlb",
-        })
+            "home_pitcher_era": float(rng.uniform(2.5, 6.0)) if with_pitchers else None,
+            "home_pitcher_whip": float(rng.uniform(0.9, 1.6)) if with_pitchers else None,
+            "home_pitcher_k9": float(rng.uniform(6.0, 12.0)) if with_pitchers else None,
+            "home_pitcher_bb9": float(rng.uniform(1.5, 4.5)) if with_pitchers else None,
+            "away_pitcher_era": float(rng.uniform(2.5, 6.0)) if with_pitchers else None,
+            "away_pitcher_whip": float(rng.uniform(0.9, 1.6)) if with_pitchers else None,
+            "away_pitcher_k9": float(rng.uniform(6.0, 12.0)) if with_pitchers else None,
+            "away_pitcher_bb9": float(rng.uniform(1.5, 4.5)) if with_pitchers else None,
+        }
+        records.append(row)
     return pd.DataFrame(records)
 
 
 def test_feature_columns_present():
-    df = _make_games(60)
+    df = _make_games(60, with_pitchers=True)
     features = build_features(df)
     assert not features.empty
     for col in FEATURE_COLUMNS:
         assert col in features.columns, f"Missing feature: {col}"
+
+
+def test_pitcher_features_fallback_to_avg():
+    """Without pitcher data, ERA/WHIP should fall back to league averages."""
+    from src.data.features import _ERA_AVG, _WHIP_AVG
+    df = _make_games(30, with_pitchers=False)
+    features = build_features(df)
+    assert (features["home_pitcher_era"] == _ERA_AVG).all()
+    assert (features["away_pitcher_era"] == _ERA_AVG).all()
+    assert (features["pitcher_known"] == 0.0).all()
+
+
+def test_pitcher_features_used_when_present():
+    """With pitcher data, ERA should reflect actual values."""
+    from src.data.features import _ERA_AVG
+    df = _make_games(30, with_pitchers=True)
+    features = build_features(df)
+    # At least some ERA values should differ from the league average
+    assert not (features["home_pitcher_era"] == _ERA_AVG).all()
+    assert (features["pitcher_known"] == 1.0).all()
+
+
+def test_era_diff_direction():
+    """era_diff = home_era - away_era."""
+    df = _make_games(30, with_pitchers=True)
+    features = build_features(df)
+    diff_check = features["home_pitcher_era"] - features["away_pitcher_era"]
+    assert (abs(features["era_diff"] - diff_check) < 1e-6).all()
 
 
 def test_target_columns_present():
@@ -65,7 +102,7 @@ def test_no_data_leakage():
 
 
 def test_inference_features_shape():
-    df = _make_games(50)
+    df = _make_games(50, with_pitchers=True)
     finished = df[df["status"] == "FINISHED"].copy()
     upcoming = pd.DataFrame([{
         "id": 9999,
@@ -76,6 +113,14 @@ def test_inference_features_shape():
         "away_runs": None,
         "status": "SCHEDULED",
         "competition": "mlb",
+        "home_pitcher_era": 3.45,
+        "home_pitcher_whip": 1.12,
+        "home_pitcher_k9": 9.5,
+        "home_pitcher_bb9": 2.8,
+        "away_pitcher_era": 4.10,
+        "away_pitcher_whip": 1.28,
+        "away_pitcher_k9": 8.1,
+        "away_pitcher_bb9": 3.2,
     }])
     inf = build_inference_features(upcoming, finished)
     assert len(inf) == 1

@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Iterable, List
 
 from loguru import logger
-from sqlalchemy import select
 
 from src.data.database import Match, SessionLocal, Team
 from src.data.mlb_api import MlbApiClient, parse_game
@@ -52,6 +51,19 @@ async def store_games(games_raw: Iterable[dict]) -> int:
                 existing.away_team_id = game["away_team_id"]
                 existing.home_runs = game["home_runs"]
                 existing.away_runs = game["away_runs"]
+                # Pitchers — always update for upcoming games (announced closer to game time)
+                existing.home_pitcher_id = game.get("home_pitcher_id")
+                existing.home_pitcher_name = game.get("home_pitcher_name")
+                existing.home_pitcher_era = game.get("home_pitcher_era")
+                existing.home_pitcher_whip = game.get("home_pitcher_whip")
+                existing.home_pitcher_k9 = game.get("home_pitcher_k9")
+                existing.home_pitcher_bb9 = game.get("home_pitcher_bb9")
+                existing.away_pitcher_id = game.get("away_pitcher_id")
+                existing.away_pitcher_name = game.get("away_pitcher_name")
+                existing.away_pitcher_era = game.get("away_pitcher_era")
+                existing.away_pitcher_whip = game.get("away_pitcher_whip")
+                existing.away_pitcher_k9 = game.get("away_pitcher_k9")
+                existing.away_pitcher_bb9 = game.get("away_pitcher_bb9")
                 count += 1
             except Exception as e:
                 logger.warning(f"Skip game {raw.get('gamePk')}: {e}")
@@ -69,5 +81,5 @@ async def ingest_history(client: MlbApiClient, seasons: List[int]) -> int:
 async def ingest_upcoming(client: MlbApiClient, days_ahead: int = 7) -> int:
     raw_games = await client.fetch_upcoming(days_ahead=days_ahead)
     n = await store_games(raw_games)
-    logger.info(f"Stored/updated {n} upcoming MLB games")
+    logger.info(f"Stored/updated {n} upcoming MLB games (with pitcher data)")
     return n

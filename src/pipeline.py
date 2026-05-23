@@ -40,6 +40,14 @@ async def _load_games_df() -> pd.DataFrame:
             "away_runs": m.away_runs,
             "competition": m.competition,
             "status": m.status,
+            "home_pitcher_era": m.home_pitcher_era,
+            "home_pitcher_whip": m.home_pitcher_whip,
+            "home_pitcher_k9": m.home_pitcher_k9,
+            "home_pitcher_bb9": m.home_pitcher_bb9,
+            "away_pitcher_era": m.away_pitcher_era,
+            "away_pitcher_whip": m.away_pitcher_whip,
+            "away_pitcher_k9": m.away_pitcher_k9,
+            "away_pitcher_bb9": m.away_pitcher_bb9,
         }
         for m in rows
     ])
@@ -245,7 +253,7 @@ async def _apply_ai_ensemble(
             away = await session.get(Team, match.away_team_id)
             if not home or not away:
                 continue
-            match_meta[mid] = (home.name, away.name, match.competition)
+            match_meta[mid] = (home.name, away.name, match.competition, match)
             tasks.append((mid, row))
 
     sem = asyncio.Semaphore(3)
@@ -258,12 +266,16 @@ async def _apply_ai_ensemble(
                 "p_over85": float(row["p_over85"]),
                 "p_rl_home": float(row["p_rl_home"]),
             }
-            home, away, comp = match_meta[mid]
+            home, away, comp, match_obj = match_meta[mid]
+            feat_dict = feats_by_id.get(mid, {})
+            # Enrich features with pitcher names from Match row
+            feat_dict["home_pitcher_name"] = match_obj.home_pitcher_name
+            feat_dict["away_pitcher_name"] = match_obj.away_pitcher_name
             ai = await ai_predict(
                 match_id=mid,
                 home=home, away=away, competition=comp,
                 ml_probs=ml_probs,
-                features=feats_by_id.get(mid, {}),
+                features=feat_dict,
             )
             return mid, ai
 
