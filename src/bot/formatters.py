@@ -185,9 +185,9 @@ def format_roi_stats(model_stats, value_stats, ai_stats) -> str:
     return "\n".join([
         "📊 <b>Статистика сигналов</b>",
         "",
-        _row("Все модели", model_stats),
-        _row("VALUE ставки", value_stats),
-        _row("AI-ансамбль", ai_stats),
+        _row("📊 MODEL (без коэффа)", model_stats),
+        _row("🔥 VALUE (с edge)", value_stats),
+        _row("🤖 AI-ансамбль", ai_stats),
     ])
 
 
