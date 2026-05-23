@@ -5,7 +5,9 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⚾ Сигналы"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📈 Кривая ROI")],
+            [KeyboardButton(text="📅 Матчи сегодня"), KeyboardButton(text="📈 Кривая ROI")],
+            [KeyboardButton(text="📋 Анализ матча"), KeyboardButton(text="💰 Расчёт Kelly")],
+            [KeyboardButton(text="🔄 Обновить коэффы"), KeyboardButton(text="📥 Скачать CSV")],
             [KeyboardButton(text="ℹ️ Помощь"), KeyboardButton(text="🔔 Уведомления")],
         ],
         resize_keyboard=True,
@@ -44,3 +46,11 @@ def notifications_kb(enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label, callback_data="notif:toggle")]
     ])
+
+
+def matches_kb(matches: list) -> InlineKeyboardMarkup:
+    """Inline keyboard with today's matches for analysis."""
+    buttons = []
+    for mid, label in matches:
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"match_info:{mid}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

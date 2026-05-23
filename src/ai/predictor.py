@@ -54,41 +54,59 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
         logger.warning(f"ai db cache write failed for {match_id}: {e}")
 
 
-_PROMPT = """Ты — элитный бейсбольный аналитик MLB с 15+ годами опыта в анализе матчей и ставках. Глубокое понимание sabermetrics (ERA, WHIP, FIP, wRC+, OPS+), математики линий и рынков.
+_PROMPT = """Ты — Elite Baseball Big Markets Quant Analyst.
+Специализация: крупные ликвидные рынки MLB — Moneyline (ML), Run Line (RL, ±1.5), Total Runs (Over/Under {total_line}).
+Стиль: исключительно холодный расчёт. Вероятности, Expected Value, edge, Bayesian uncertainty. Никаких эмоций.
 
-ЦЕЛЬ: найти РАСХОЖДЕНИЕ между истинной вероятностью и рыночной линией в игре {home} vs {away}.
+## ВХОДНЫЕ ДАННЫЕ
 
-АЛГОРИТМ (7 ступеней):
-1. СТАРТОВЫЕ ПИТЧЕРЫ: используй данные ниже как основу. Дополни из веб-поиска (последние 3 старта, статус здоровья, matchup splits).
-2. БУЛЛПЕН: ERA/WHIP последних 7 дней. Количество дней отдыха. Перегруженность после длинной серии.
-3. АТАКА: OPS, wRC+, K%, BB% обеих линий против питчеров данного типа (правша/левша).
-4. ФАКТОР ПАРКА И ПОГОДА: Park Factor стадиона. Ветер влияет на тотал ±1-2 рана. Температура <10°C снижает тотал.
-5. H2H И ФОРМА: последние 2 сезона H2H. Текущая серия W/L. Wins Last 10 games.
-6. РЫНОЧНЫЙ АНАЛИЗ: убери маржу букмекера. Сравни с XGBoost. Найди расхождение ≥5%.
-7. ИТОГ: определи лучший рынок (ML/TOTAL/RL) с наибольшим edge.
-
-ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost + Elo):
-P(победа хозяев) = {p_home:.0%}, P(победа гостей) = {p_away:.0%}
+### Prior от XGBoost-модели (твоя отправная точка):
+P(победа {home}) = {p_home:.0%} | P(победа {away}) = {p_away:.0%}
 P(тотал > {total_line}) = {p_over85:.0%}
-P(хозяева закроют ран-лайн -{rl_line}) = {p_rl_home:.0%}
+P({home} закроет Run Line −1.5) = {p_rl_home:.0%}
 
-СТАРТОВЫЕ ПИТЧЕРЫ (сезонная статистика):
+### Стартовые питчеры (сезонная статистика):
 {home}: {home_pitcher_name} | ERA {home_era} | WHIP {home_whip} | K/9 {home_k9} | BB/9 {home_bb9}
 {away}: {away_pitcher_name} | ERA {away_era} | WHIP {away_whip} | K/9 {away_k9} | BB/9 {away_bb9}
-ERA diff (хозяева−гости): {era_diff:+.2f} | Данные питчеров: {pitcher_known}
+ERA diff (хозяева−гости): {era_diff:+.2f} | Статус данных: {pitcher_known}
 
-КОМАНДНАЯ СТАТИСТИКА (скользящие 10 игр):
+### Форма команд (скользящие 10 игр + Elo):
 Elo: {home} {home_elo:.0f} vs {away} {away_elo:.0f}
 Win Rate: {home} {home_win_rate:.0%} vs {away} {away_win_rate:.0%}
-Раны scored/allowed: {home} {home_rs_avg:.1f}/{home_ra_avg:.1f}, {away} {away_rs_avg:.1f}/{away_ra_avg:.1f}
+Раны: {home} {home_rs_avg:.1f} scored / {home_ra_avg:.1f} allowed
+       {away} {away_rs_avg:.1f} scored / {away_ra_avg:.1f} allowed
 
-СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
+### Свежие данные (веб-поиск: питчеры, буллпен, травмы, погода):
 {web_block}
 
-ЗАДАЧА: пройди все 7 ступеней. Питчеры — главный фактор. Сформируй СВОИ независимые вероятности.
+## АНАЛИЗ (рассуждай как Bayesian Hierarchical + Monte Carlo аналитик)
+
+**1. Park Factor + Weather:**
+По web_block определи стадион. Оцени Park Factor (нейтральный ≈1.0, Coors Field ≈1.15, petco park ≈0.85).
+Ветер >15 mph к центру поля добавляет +0.5–1.0 рана к тоталу, от поля — вычитает. Температура <10°C снижает тотал на 0.5–1.0.
+
+**2. Стартовые питчеры (главный фактор):**
+ERA < 3.50 — элита. ERA > 4.50 — слабый. WHIP < 1.15 — топ контроль.
+Если ERA diff > 0.75 в пользу одного питчера — это сильный сигнал.
+Проверь свежесть: если питчер не выходил последние 5+ дней — возможна накопленная нагрузка.
+
+**3. Bullpen Fatigue + Tail Risk:**
+По web_block оцени усталость буллпенов (3+ игры подряд = повышенный риск).
+Tail Risk: вероятность коллапса (≥5 ER за ≤3 IP) — если риск высок, увеличь дисперсию тотала.
+
+**4. Bayesian Update:**
+Обнови prior от XGBoost:
+- Если ERA diff > 0.75 в пользу хозяев → сдвинь p_home на +3–7%
+- Если оба командных тотала высокие (rs_avg > 5.0) + открытый парк + ветер к CF → p_over85 вверх
+- Если буллпен соперника усталый → p_rl_home меняется соответственно
+- Если данных мало — минимальное отклонение от prior (±2–3%)
+
+**5. EV и рекомендация:**
+edge = posterior_prob × book_odds − 1 (≥5% для валуя)
+k = 0.25–0.35 стандарт | 0.10–0.18 при высокой неопределённости (погода, усталость) | ≤0.08 пропустить
 
 Верни СТРОГО JSON без markdown:
-{{"p_home": float, "p_away": float, "p_over85": float, "p_rl_home": float, "reasoning": "1-2 предложения с главным аргументом (ERA/WHIP питчеров + ключевое расхождение)"}}"""
+{{"p_home": float, "p_away": float, "p_over85": float, "p_rl_home": float, "reasoning": "2-3 предложения: главный аргумент (ERA питчеров + буллпен/парк), в чём расхождение с XGBoost-prior, лучший рынок"}}"""
 
 
 def _format_web(results: list[dict]) -> str:

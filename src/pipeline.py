@@ -138,14 +138,14 @@ async def generate_and_broadcast(bot) -> int:
         return 0
     finished = df[df["status"] == "FINISHED"].copy()
     now = datetime.utcnow()
-    horizon = now + timedelta(hours=4)
+    horizon = now + timedelta(hours=24)
     upcoming = df[
         (df["status"] != "FINISHED")
-        & (df["utc_date"] >= now)
+        & (df["utc_date"] >= now - timedelta(hours=1))
         & (df["utc_date"] <= horizon)
     ].copy()
     if upcoming.empty:
-        logger.info("No upcoming games in the next 4 hours")
+        logger.info("No upcoming games in the next 24 hours")
         return 0
     feats = build_inference_features(upcoming, finished)
     if feats.empty:
