@@ -398,6 +398,18 @@ async def cmd_admin(msg: Message):
     )
 
 
+@router.message(Command("train"))
+async def cmd_train(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("🔄 Обучение моделей запущено, подождите...")
+    try:
+        from src.pipeline import train_models
+        await train_models(bot=msg.bot)
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка обучения: {e}")
+
+
 @router.message(Command("debugodds"))
 async def cmd_debug_odds(msg: Message):
     if not is_admin(msg.from_user.id):
@@ -460,8 +472,13 @@ async def cb_admin(cb: CallbackQuery):
     elif action == "ai_toggle":
         await _admin_ai_toggle(cb)
     elif action == "train":
-        await cb.message.answer("Запустите /train вручную")
-        await cb.answer()
+        await cb.answer("Запускаю обучение...")
+        await cb.message.answer("🔄 Обучение моделей запущено, подождите...")
+        try:
+            from src.pipeline import train_models
+            await train_models(bot=cb.bot)
+        except Exception as e:
+            await cb.message.answer(f"❌ Ошибка обучения: {e}")
     elif action == "leads":
         await _admin_leads(cb)
 
