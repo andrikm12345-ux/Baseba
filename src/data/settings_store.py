@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from loguru import logger
 from sqlalchemy import select
 
@@ -29,8 +31,17 @@ async def set_str(key: str, value: str) -> None:
         logger.warning(f"settings_store set_str({key}) failed: {e}")
 
 
+_ENV_DEFAULTS = {
+    "ai_ensemble_enabled": os.getenv("AI_ENSEMBLE", "").lower() in {"1", "true", "yes", "on"},
+}
+
+
 async def get_bool(key: str, default: bool = False) -> bool:
-    val = await get_str(key, str(default).lower())
+    # Env var takes precedence as persistent default across restarts
+    env_default = _ENV_DEFAULTS.get(key, default)
+    val = await get_str(key, "")
+    if val == "":
+        return env_default
     return val.lower() in {"1", "true", "yes", "on"}
 
 
