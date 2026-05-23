@@ -26,7 +26,7 @@ DEFAULT_BOOKMAKERS = "Bet365,Betfair Exchange"
 SPORT = "baseball"
 
 LEAGUE_TO_SLUG: Dict[str, str] = {
-    "mlb": "baseball_mlb",
+    "mlb": "usa-mlb",
 }
 
 ML_NAMES = {"ml", "moneyline", "h2h", "match winner", "1x2"}
