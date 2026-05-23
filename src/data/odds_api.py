@@ -48,7 +48,7 @@ class OddsApiError(Exception):
 
 
 class OddsApiClient:
-    def __init__(self, api_key: str, cache_ttl_seconds: float = 3600.0) -> None:
+    def __init__(self, api_key: str, cache_ttl_seconds: float = 300.0) -> None:
         self.api_key = api_key
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: Dict[str, Tuple[float, Any]] = {}
@@ -268,11 +268,13 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                 for entry in odds_list:
                     if not isinstance(entry, dict):
                         continue
+                    # Only back odds (не lay): lay-коэффициенты на Betfair биржевые
+                    # и могут быть 50-110 на явного проигрывающего — они нерелевантны
                     h = _as_float(entry.get("home"))
                     a = _as_float(entry.get("away"))
-                    if h:
+                    if h and h < 15.0:
                         aggregated["odds_ml_home"].append(h)
-                    if a:
+                    if a and a < 15.0:
                         aggregated["odds_ml_away"].append(a)
 
             elif name in TOTAL_NAMES:
@@ -288,9 +290,9 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                         continue
                     over = _as_float(entry.get("over"))
                     under = _as_float(entry.get("under"))
-                    if over:
+                    if over and over < 15.0:
                         aggregated["odds_over85"].append(over)
-                    if under:
+                    if under and under < 15.0:
                         aggregated["odds_under85"].append(under)
 
             elif name in RL_NAMES:
@@ -304,12 +306,12 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                         hdp_f = None
                     if hdp_f is None or abs(abs(hdp_f) - rl_line) > 0.26:
                         continue
-                    home_lay = _as_float(entry.get("home"))
-                    away_lay = _as_float(entry.get("away"))
-                    if home_lay:
-                        aggregated["odds_rl_home"].append(home_lay)
-                    if away_lay:
-                        aggregated["odds_rl_away"].append(away_lay)
+                    h = _as_float(entry.get("home"))
+                    a = _as_float(entry.get("away"))
+                    if h and h < 15.0:
+                        aggregated["odds_rl_home"].append(h)
+                    if a and a < 15.0:
+                        aggregated["odds_rl_away"].append(a)
 
     return {k: (max(v) if v else 0.0) for k, v in aggregated.items()}
 

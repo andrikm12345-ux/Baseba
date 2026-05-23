@@ -140,9 +140,11 @@ async def generate_and_broadcast(bot) -> int:
     finished = df[df["status"] == "FINISHED"].copy()
     now = datetime.utcnow()
     horizon = now + timedelta(hours=24)
+    # Only pre-game: игра не началась (utc_date > now - 15 min).
+    # Live odds совершенно другие и нерелевантны для pre-game сигналов.
     upcoming = df[
         (df["status"] != "FINISHED")
-        & (df["utc_date"] >= now - timedelta(hours=1))
+        & (df["utc_date"] >= now - timedelta(minutes=15))
         & (df["utc_date"] <= horizon)
     ].copy()
     if upcoming.empty:
