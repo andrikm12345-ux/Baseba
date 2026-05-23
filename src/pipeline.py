@@ -117,6 +117,7 @@ async def _store_signals(
             row = SignalRow(
                 match_id=s.match_id, market=s.market, pick=s.pick,
                 is_ai_ensemble=(s.match_id in ai_ids),
+                is_value=s.is_value,
                 model_prob=s.model_prob, fair_odds=s.fair_odds,
                 book_odds=s.book_odds, edge=s.edge, confidence=s.confidence,
                 stake_units=s.stake_units,
