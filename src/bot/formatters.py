@@ -100,8 +100,6 @@ def format_signal(
             f"<b>Edge:</b> +{signal.edge:.1%}",
             f"<b>Ставка:</b> {signal.stake_units:.2f} ед.",
         ]
-    if ai_comment:
-        lines += ["", f"💬 <i>{ai_comment}</i>"]
     return "\n".join(lines)
 
 
