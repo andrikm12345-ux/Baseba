@@ -64,7 +64,15 @@ def format_signal(
     away_name = away.name if away else "Гости"
     kickoff = _msk(match.utc_date)
     market_label = MARKET_LABELS.get(signal.market, signal.market)
-    pick_label = PICK_LABELS.get(signal.pick, signal.pick)
+
+    # RL pick показываем с именем команды
+    if signal.market == "RL":
+        if signal.pick == "COVER":
+            pick_label = f"{home_name} −{settings.rl_line}"
+        else:
+            pick_label = f"{away_name} +{settings.rl_line}"
+    else:
+        pick_label = PICK_LABELS.get(signal.pick, signal.pick)
 
     badge = "🔥 <b>VALUE</b>" if signal.is_value else "📊 <b>MODEL</b>"
     ai_badge = " 🤖" if signal.is_ai_ensemble else ""
@@ -83,11 +91,12 @@ def format_signal(
         f"<b>Рынок:</b> {market_label}",
         f"<b>Прогноз:</b> {pick_label}",
         f"<b>Уверенность:</b> {signal.confidence:.0%}",
-        f"<b>Честные коэф.:</b> {signal.fair_odds:.2f}",
+        f"<b>Честный коэф.:</b> {signal.fair_odds:.2f}",
     ]
-    if signal.is_value and signal.book_odds > 1.0:
+    if signal.book_odds > 1.0:
+        lines.append(f"<b>Коэф. БК:</b> {signal.book_odds:.2f}")
+    if signal.is_value and signal.edge > 0:
         lines += [
-            f"<b>Коэф. БК:</b> {signal.book_odds:.2f}",
             f"<b>Edge:</b> +{signal.edge:.1%}",
             f"<b>Ставка:</b> {signal.stake_units:.2f} ед.",
         ]
@@ -112,11 +121,16 @@ def format_signal_short(signals: list[Signal], matches: dict, teams: dict) -> st
         away = teams.get(m.away_team_id)
         h_name = (home.short_name or home.name)[:12] if home else "?"
         a_name = (away.short_name or away.name)[:12] if away else "?"
-        pick_label = PICK_LABELS.get(s.pick, s.pick)
         market_label = MARKET_LABELS.get(s.market, s.market)
+        if s.market == "RL":
+            pick_label = f"{h_name} −{settings.rl_line}" if s.pick == "COVER" else f"{a_name} +{settings.rl_line}"
+        else:
+            pick_label = PICK_LABELS.get(s.pick, s.pick)
         badge = "🔥" if s.is_value else "📊"
         line = f"{badge} {h_name}–{a_name} | {market_label} → {pick_label} ({s.confidence:.0%})"
-        if s.is_value:
+        if s.book_odds and s.book_odds > 1.0:
+            line += f" @ {s.book_odds:.2f}"
+        if s.is_value and s.edge > 0:
             line += f" | edge {s.edge:.1%}"
         lines.append(line)
     return "\n".join(lines)
