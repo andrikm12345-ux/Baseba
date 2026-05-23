@@ -172,7 +172,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 
 def _event_kickoff(ev: Dict[str, Any]) -> Optional[datetime]:
-    for key in ("commenceTime", "commence_time", "startTime", "start_time", "kickoff", "date", "scheduled"):
+    for key in ("date", "commenceTime", "commence_time", "startTime", "start_time", "kickoff", "scheduled"):
         if key in ev:
             dt = _parse_dt(ev[key])
             if dt:
@@ -181,8 +181,9 @@ def _event_kickoff(ev: Dict[str, Any]) -> Optional[datetime]:
 
 
 def _event_teams(ev: Dict[str, Any]) -> Tuple[str, str]:
-    home = ev.get("homeTeam") or ev.get("home_team") or ev.get("home")
-    away = ev.get("awayTeam") or ev.get("away_team") or ev.get("away")
+    # odds-api.io returns "home"/"away" as plain strings
+    home = ev.get("home") or ev.get("homeTeam") or ev.get("home_team")
+    away = ev.get("away") or ev.get("awayTeam") or ev.get("away_team")
     if isinstance(home, dict):
         home = home.get("name") or home.get("title") or ""
     if isinstance(away, dict):
@@ -340,17 +341,17 @@ async def fetch_odds_for_matches(
         if league in events_cache:
             continue
         slug = LEAGUE_TO_SLUG.get(league)
-        if slug and slug not in bad_slugs:
-            try:
-                evs = await client.fetch_events(sport=SPORT, league=slug, limit=300)
-            except OddsApiError as e:
-                if e.status == 404:
-                    bad_slugs.add(slug)
-                    evs = []
-                else:
-                    evs = []
-        else:
-            evs = await client.fetch_events(sport=SPORT, limit=300)
+        # Fetch all baseball events and filter by league slug client-side
+        # (odds-api.io league param causes 404 for unknown slugs)
+        try:
+            evs = await client.fetch_events(sport=SPORT, limit=500)
+        except OddsApiError:
+            evs = []
+        if slug:
+            evs = [
+                ev for ev in evs
+                if (ev.get("league") or {}).get("slug", "") == slug
+            ]
         evs = [ev for ev in evs if _is_upcoming(ev, now)]
         events_cache[league] = evs
         logger.info(f"odds-api.io: {len(evs)} upcoming events for league={league} (slug={slug})")

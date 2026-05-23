@@ -410,31 +410,41 @@ async def cmd_debug_odds(msg: Message):
     from src.data.odds_api import OddsApiClient
     client = OddsApiClient(cfg.odds_api_key)
     try:
-        # 1. Попробуем /sports чтобы найти правильный slug для бейсбола
-        await msg.answer("🔍 Запрашиваю список видов спорта...")
-        try:
-            sports = await client._get("/sports", {})
-            text = json.dumps(sports)[:1200]
-            await msg.answer(f"<b>/sports:</b>\n<pre>{text}</pre>", parse_mode="HTML")
-        except Exception as e:
-            await msg.answer(f"/sports ошибка: {e}")
+        # Fetch all baseball events, find MLB league slug + check odds for first event
+        await msg.answer("🔍 Ищу MLB события (все бейсбол, до 200)...")
+        data = await client._get("/events", {"sport": "baseball", "limit": 200})
+        events = data if isinstance(data, list) else data.get("events", [])
 
-        # 2. Попробуем /events без фильтра по лиге
-        await msg.answer("🔍 Запрашиваю /events без league фильтра (baseball)...")
-        try:
-            data = await client._get("/events", {"sport": "baseball", "limit": 3})
-            text = json.dumps(data)[:1200]
-            await msg.answer(f"<b>/events sport=baseball:</b>\n<pre>{text}</pre>", parse_mode="HTML")
-        except Exception as e:
-            await msg.answer(f"/events baseball ошибка: {e}")
+        # Collect unique league slugs
+        leagues: dict[str, str] = {}
+        mlb_events = []
+        for ev in events:
+            lg = ev.get("league") or {}
+            slug = lg.get("slug", "") if isinstance(lg, dict) else ""
+            name = lg.get("name", "") if isinstance(lg, dict) else ""
+            leagues[slug] = name
+            if "mlb" in slug.lower() or "major-league" in slug.lower():
+                mlb_events.append(ev)
 
-        # 3. Попробуем с sport=mlb
-        try:
-            data2 = await client._get("/events", {"sport": "mlb", "limit": 3})
-            text2 = json.dumps(data2)[:800]
-            await msg.answer(f"<b>/events sport=mlb:</b>\n<pre>{text2}</pre>", parse_mode="HTML")
-        except Exception as e:
-            await msg.answer(f"/events mlb ошибка: {e}")
+        league_list = "\n".join(f"  {s}: {n}" for s, n in sorted(leagues.items()))
+        await msg.answer(f"<b>Лиги в бейсболе ({len(leagues)}):</b>\n<pre>{league_list[:1000]}</pre>", parse_mode="HTML")
+
+        if mlb_events:
+            ev = mlb_events[0]
+            await msg.answer(f"<b>MLB событие найдено:</b>\n<pre>{json.dumps(ev)[:800]}</pre>", parse_mode="HTML")
+            # Try /odds for this event
+            ev_id = ev.get("id")
+            if ev_id:
+                await msg.answer(f"🔍 Запрашиваю /odds для event {ev_id}...")
+                try:
+                    odds = await client._get("/odds", {"eventId": ev_id, "bookmakers": "Bet365,Betfair Exchange"})
+                    await msg.answer(f"<b>/odds ответ:</b>\n<pre>{json.dumps(odds)[:1200]}</pre>", parse_mode="HTML")
+                except Exception as e:
+                    await msg.answer(f"/odds ошибка: {e}")
+        else:
+            await msg.answer("⚠️ MLB событий не найдено среди бейсбол событий.\nВозможно лига называется иначе — смотри список выше.")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")
     finally:
         await client.close()
 
