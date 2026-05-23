@@ -390,7 +390,33 @@ async def cmd_download_csv(msg: Message):
 async def cmd_admin(msg: Message):
     if not is_admin(msg.from_user.id):
         return
-    await msg.answer("🔧 Админ-панель", reply_markup=admin_menu())
+    from src.data.settings_store import get_bool
+    ai_on = await get_bool("ai_ensemble_enabled", False)
+    await msg.answer(
+        f"🔧 Админ-панель\n🤖 AI Ансамбль: {'✅ включён' if ai_on else '❌ выключен'}",
+        reply_markup=admin_menu(),
+    )
+
+
+@router.message(Command("debugodds"))
+async def cmd_debug_odds(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    from src.config import settings as cfg
+    if not cfg.odds_api_key:
+        await msg.answer("❌ ODDS_API_KEY не задан")
+        return
+    await msg.answer("🔍 Делаю запрос к odds-api.io...")
+    try:
+        from src.data.odds_api import OddsApiClient, SPORT
+        import json
+        client = OddsApiClient(cfg.odds_api_key)
+        data = await client._get("/events", {"sport": SPORT, "league": "baseball_mlb", "limit": 5})
+        preview = json.dumps(data)[:1000]
+        await msg.answer(f"<pre>{preview}</pre>", parse_mode="HTML")
+        await client.close()
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("admin:"))

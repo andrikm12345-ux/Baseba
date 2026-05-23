@@ -111,15 +111,23 @@ class OddsApiClient:
             logger.warning(f"fetch_events failed: {e}")
             return []
         events = data if isinstance(data, list) else data.get("events", [])
-        if events and not self._first_event_logged:
+        if not self._first_event_logged:
             self._first_event_logged = True
-            try:
-                logger.info(
-                    f"odds-api.io sample event (keys={list(events[0].keys())}): "
-                    f"{json.dumps(events[0])[:800]}"
+            if events:
+                try:
+                    logger.info(
+                        f"odds-api.io sample event (keys={list(events[0].keys())}): "
+                        f"{json.dumps(events[0])[:800]}"
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.warning(
+                    f"odds-api.io returned 0 events. "
+                    f"Raw response type={type(data).__name__} "
+                    f"keys={list(data.keys()) if isinstance(data, dict) else 'list'} "
+                    f"preview={json.dumps(data)[:400]}"
                 )
-            except Exception:
-                pass
         return events
 
     async def fetch_event_odds(
@@ -345,7 +353,7 @@ async def fetch_odds_for_matches(
             evs = await client.fetch_events(sport=SPORT, limit=300)
         evs = [ev for ev in evs if _is_upcoming(ev, now)]
         events_cache[league] = evs
-        logger.info(f"odds-api.io: {len(evs)} upcoming events for league={league}")
+        logger.info(f"odds-api.io: {len(evs)} upcoming events for league={league} (slug={slug})")
 
     out: Dict[int, Dict[str, float]] = {}
     for match_id, league, home, away, kickoff in upcoming:
