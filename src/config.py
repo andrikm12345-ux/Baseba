@@ -9,7 +9,7 @@ DATA_DIR = Path("data")
 
 
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "env_ignore_empty": True}
 
     telegram_bot_token: str = ""
     admin_ids: list[int] = []
