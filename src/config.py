@@ -1,15 +1,43 @@
 from pathlib import Path
 from typing import Optional
 
-from pydantic import field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
 
 MODELS_DIR = Path("models")
 DATA_DIR = Path("data")
 
 
+class _CsvEnvSource(EnvSettingsSource):
+    """Custom env source that parses comma-separated strings for list fields.
+
+    Bypasses pydantic-settings' json.loads() path for these fields so that
+    LEAGUES=mlb or ADMIN_IDS=123,456 work without wrapping in JSON brackets,
+    and empty values fall back to their defaults.
+    """
+
+    _LIST_FIELDS: dict = {
+        "leagues": (str, ["mlb"]),
+        "admin_ids": (int, []),
+    }
+
+    def prepare_field_value(self, field_name, field, value, value_is_complex):
+        if field_name in self._LIST_FIELDS and isinstance(value, str):
+            elem_type, default = self._LIST_FIELDS[field_name]
+            stripped = value.strip()
+            if not stripped:
+                return default
+            # Accept both JSON array and comma-separated plain strings
+            if stripped.startswith("["):
+                return super().prepare_field_value(field_name, field, value, value_is_complex)
+            try:
+                return [elem_type(x.strip()) for x in stripped.split(",") if x.strip()]
+            except (ValueError, TypeError):
+                return default
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
+
+
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env", "env_ignore_empty": True}
+    model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True)
 
     telegram_bot_token: str = ""
     admin_ids: list[int] = []
@@ -38,21 +66,19 @@ class Settings(BaseSettings):
         MODELS_DIR.mkdir(exist_ok=True)
         DATA_DIR.mkdir(exist_ok=True)
 
-    @field_validator("admin_ids", mode="before")
     @classmethod
-    def parse_admin_ids(cls, v):
-        if isinstance(v, str):
-            return [int(x.strip()) for x in v.split(",") if x.strip()]
-        return v or []
-
-    @field_validator("leagues", mode="before")
-    @classmethod
-    def parse_leagues(cls, v):
-        if isinstance(v, str):
-            if not v.strip():
-                return ["mlb"]
-            return [x.strip().lower() for x in v.split(",") if x.strip()]
-        return v or ["mlb"]
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings=None,
+        env_settings=None,
+        dotenv_settings=None,
+        secrets_settings=None,
+        file_secret_settings=None,
+        **_,
+    ):
+        extras = tuple(x for x in (dotenv_settings, secrets_settings, file_secret_settings) if x is not None)
+        return (init_settings, _CsvEnvSource(settings_cls)) + extras
 
 
 settings = Settings()
