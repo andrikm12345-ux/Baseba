@@ -13,6 +13,7 @@ MARKET_LABELS: dict[str, str] = {
     "ML": "Мани-лайн",
     "TOTAL": f"Тотал ({settings.total_line})",
     "RL": f"Ран-лайн (±{settings.rl_line})",
+    "ITB": f"ИТБ ({settings.itb_line})",
 }
 
 PICK_LABELS: dict[str, str] = {
@@ -22,6 +23,8 @@ PICK_LABELS: dict[str, str] = {
     "UNDER": "Тотал М",
     "COVER": f"−{settings.rl_line}",
     "LAY": f"+{settings.rl_line}",
+    "HOME_OVER": "Хозяева ТБ",
+    "AWAY_OVER": "Гости ТБ",
 }
 
 
@@ -65,7 +68,6 @@ def format_signal(
     kickoff = _msk(match.utc_date)
     market_label = MARKET_LABELS.get(signal.market, signal.market)
 
-    # RL pick показываем с именем команды и направлением форы
     if signal.market == "RL":
         if signal.pick == "COVER":
             pick_label = f"{home_name} −{settings.rl_line}"
@@ -73,8 +75,11 @@ def format_signal(
             pick_label = f"{away_name} +{settings.rl_line}"
         elif signal.pick == "AWAY_COVER":
             pick_label = f"{away_name} −{settings.rl_line}"
-        else:  # HOME_LAY
+        else:
             pick_label = f"{home_name} +{settings.rl_line}"
+    elif signal.market == "ITB":
+        team = home_name if signal.pick == "HOME_OVER" else away_name
+        pick_label = f"{team} ТБ {settings.itb_line}"
     else:
         pick_label = PICK_LABELS.get(signal.pick, signal.pick)
 
@@ -131,8 +136,11 @@ def format_signal_short(signals: list[Signal], matches: dict, teams: dict) -> st
                 pick_label = f"{a_name} +{settings.rl_line}"
             elif s.pick == "AWAY_COVER":
                 pick_label = f"{a_name} −{settings.rl_line}"
-            else:  # HOME_LAY
+            else:
                 pick_label = f"{h_name} +{settings.rl_line}"
+        elif s.market == "ITB":
+            team = h_name if s.pick == "HOME_OVER" else a_name
+            pick_label = f"{team} ТБ {settings.itb_line}"
         else:
             pick_label = PICK_LABELS.get(s.pick, s.pick)
         badge = "🔥" if s.is_value else "📊"

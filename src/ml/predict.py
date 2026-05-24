@@ -49,7 +49,7 @@ def _mirror_features(X: np.ndarray) -> np.ndarray:
 
 
 async def restore_models_from_db() -> bool:
-    """Download model blobs from DB to disk. Returns True if all 3 restored."""
+    """Download model blobs from DB to disk. Returns True if the 3 core models restored."""
     try:
         from src.data.database import ModelBlob, SessionLocal
         restored = 0
@@ -58,6 +58,7 @@ async def restore_models_from_db() -> bool:
                 ("model_ml", "model_ml.joblib"),
                 ("model_total", "model_total.joblib"),
                 ("model_rl", "model_rl.joblib"),
+                ("model_itb", "model_itb.joblib"),
             ]:
                 path = MODELS_DIR / filename
                 if path.exists():
@@ -69,7 +70,7 @@ async def restore_models_from_db() -> bool:
                     path.write_bytes(blob.data)
                     logger.info(f"Model '{name}' restored from DB ({len(blob.data)//1024} KB)")
                     restored += 1
-        return restored == 3
+        return restored >= 3
     except Exception as e:
         logger.warning(f"restore_models_from_db failed: {e}")
         return False
@@ -80,6 +81,7 @@ class Predictor:
         self.m_ml = self._load(MODELS_DIR / "model_ml.joblib")
         self.m_total = self._load(MODELS_DIR / "model_total.joblib")
         self.m_rl = self._load(MODELS_DIR / "model_rl.joblib")
+        self.m_itb = self._load(MODELS_DIR / "model_itb.joblib")
 
     @staticmethod
     def _load(path: Path) -> Optional[dict]:
@@ -114,4 +116,12 @@ class Predictor:
         out["p_over85"] = p_total
         out["p_rl_home"] = p_rl
         out["p_rl_away"] = p_rl_away
+        if self.m_itb:
+            p_itb_home = self.m_itb["model"].predict_proba(X)[:, 1]
+            p_itb_away = self.m_itb["model"].predict_proba(_mirror_features(X))[:, 1]
+            out["p_itb_home"] = p_itb_home
+            out["p_itb_away"] = p_itb_away
+        else:
+            out["p_itb_home"] = 0.0
+            out["p_itb_away"] = 0.0
         return out

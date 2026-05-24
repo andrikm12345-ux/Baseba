@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     max_odds: float = 4.50
     total_line: float = 8.5
     rl_line: float = 1.5
+    itb_line: float = 4.5
     ai_ensemble_weight: float = 0.3
     ai_ensemble_top_n: int = 10
     ai_ensemble_min_prob: float = 0.55

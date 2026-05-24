@@ -38,6 +38,10 @@ RL_NAMES = {
     "run line", "runline", "rl", "spread", "puck line",
     "handicap", "asian handicap",
 }
+TEAM_TOTAL_NAMES = {
+    "team totals", "team total", "home team total", "away team total",
+    "team total runs", "alternate team totals", "batter totals",
+}
 
 
 class OddsApiError(Exception):
@@ -247,6 +251,8 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
         "odds_rl_away": [],       # away +1.5 (hdp < 0)
         "odds_rl_away_cover": [], # away -1.5 (hdp > 0)
         "odds_rl_home_lay": [],   # home +1.5 (hdp > 0)
+        "odds_itb_home": [],
+        "odds_itb_away": [],
     }
 
     books = odds_payload.get("bookmakers") or {}
@@ -322,6 +328,39 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                             aggregated["odds_rl_home_lay"].append(h)
                         if a and a < 15.0:
                             aggregated["odds_rl_away_cover"].append(a)
+
+            elif name in TEAM_TOTAL_NAMES:
+                for entry in odds_list:
+                    if not isinstance(entry, dict):
+                        continue
+                    hdp = entry.get("hdp") or entry.get("line") or entry.get("total")
+                    try:
+                        hdp_f = float(hdp) if hdp is not None else None
+                    except (TypeError, ValueError):
+                        hdp_f = None
+                    if hdp_f is not None and abs(hdp_f - settings.itb_line) > 0.3:
+                        continue
+
+                    # Format 1: home/away nested dicts
+                    home_data = entry.get("home")
+                    away_data = entry.get("away")
+                    if isinstance(home_data, dict):
+                        h_over = _as_float(home_data.get("over"))
+                        if h_over and h_over < 15.0:
+                            aggregated["odds_itb_home"].append(h_over)
+                    if isinstance(away_data, dict):
+                        a_over = _as_float(away_data.get("over"))
+                        if a_over and a_over < 15.0:
+                            aggregated["odds_itb_away"].append(a_over)
+
+                    # Format 2: flat entry with team indicator
+                    team = str(entry.get("team") or entry.get("name") or "").lower()
+                    over_val = _as_float(entry.get("over"))
+                    if over_val and over_val < 15.0:
+                        if "home" in team:
+                            aggregated["odds_itb_home"].append(over_val)
+                        elif "away" in team:
+                            aggregated["odds_itb_away"].append(over_val)
 
     return {k: (max(v) if v else 0.0) for k, v in aggregated.items()}
 

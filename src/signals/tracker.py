@@ -20,13 +20,18 @@ def _did_win(market: str, pick: str, home_runs: int, away_runs: int) -> bool:
         return (total > settings.total_line) if pick == "OVER" else (total < settings.total_line)
     if market == "RL":
         if pick == "COVER":
-            return diff > settings.rl_line        # home wins by 2+
+            return diff > settings.rl_line
         if pick == "LAY":
-            return diff < settings.rl_line        # away +1.5: home doesn't win by 2+
+            return diff < settings.rl_line
         if pick == "AWAY_COVER":
-            return (-diff) > settings.rl_line     # away wins by 2+
+            return (-diff) > settings.rl_line
         if pick == "HOME_LAY":
-            return (-diff) < settings.rl_line     # home +1.5: away doesn't win by 2+
+            return (-diff) < settings.rl_line
+    if market == "ITB":
+        if pick == "HOME_OVER":
+            return home_runs > settings.itb_line
+        if pick == "AWAY_OVER":
+            return away_runs > settings.itb_line
     return False
 
 

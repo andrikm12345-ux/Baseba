@@ -206,6 +206,8 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
                     "ml_home": int(hr > ar),            # moneyline: home wins
                     "over85": int(total_runs > 8),      # total runs > 8.5
                     "rl_home": int(hr - ar > 1),        # run line: home covers -1.5
+                    "itb_home": int(hr > 4),            # home scores > 4.5 (hr is int, so > 4 == > 4.5)
+                    "itb_away": int(ar > 4),            # away scores > 4.5
                     "total_runs": total_runs,
                 }
             )
@@ -222,7 +224,7 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
             h2h[key].append((hr, ar) if home_id == key[0] else (ar, hr))
 
     if not feats:
-        return pd.DataFrame(columns=["match_id", *FEATURE_COLUMNS, "ml_home", "over85", "rl_home"])
+        return pd.DataFrame(columns=["match_id", *FEATURE_COLUMNS, "ml_home", "over85", "rl_home", "itb_home", "itb_away"])
     f_df = pd.DataFrame(feats)
     t_df = pd.DataFrame(targets)
     return f_df.merge(t_df, on="match_id")

@@ -66,7 +66,12 @@ def _train_one(X: pd.DataFrame, y: np.ndarray, name: str) -> CalibratedClassifie
 
 async def save_all_to_db() -> None:
     """Save all model files to DB (call after train_all)."""
-    for name, filename in [("model_ml", "model_ml.joblib"), ("model_total", "model_total.joblib"), ("model_rl", "model_rl.joblib")]:
+    for name, filename in [
+        ("model_ml", "model_ml.joblib"),
+        ("model_total", "model_total.joblib"),
+        ("model_rl", "model_rl.joblib"),
+        ("model_itb", "model_itb.joblib"),
+    ]:
         p = MODELS_DIR / filename
         if p.exists():
             await _save_model_to_db(name, p)
@@ -78,11 +83,12 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
             f"Not enough training data ({len(features_df)} rows). "
             "Run the history ingest first."
         )
-    features_df = features_df.dropna(subset=["ml_home", "over85", "rl_home"]).reset_index(drop=True)
+    features_df = features_df.dropna(subset=["ml_home", "over85", "rl_home", "itb_home", "itb_away"]).reset_index(drop=True)
     X = features_df[FEATURE_COLUMNS].astype(float)
     y_ml = features_df["ml_home"].astype(int).values
     y_total = features_df["over85"].astype(int).values
     y_rl = features_df["rl_home"].astype(int).values
+    y_itb_home = features_df["itb_home"].astype(int).values
 
     paths: Dict[str, Path] = {}
 
@@ -104,11 +110,18 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
     joblib.dump({"model": m_rl, "features": FEATURE_COLUMNS}, p)
     paths["RL"] = p
 
+    logger.info(f"Training ITB (individual team total) on {len(X)} rows")
+    m_itb = _train_one(X, y_itb_home, "ITB")
+    p = MODELS_DIR / "model_itb.joblib"
+    joblib.dump({"model": m_itb, "features": FEATURE_COLUMNS}, p)
+    paths["ITB"] = p
+
     metrics_inn = {
         "n_train": len(X),
         "ml_brier": float(brier_score_loss(y_ml, m_ml.predict_proba(X)[:, 1])),
         "total_brier": float(brier_score_loss(y_total, m_total.predict_proba(X)[:, 1])),
         "rl_brier": float(brier_score_loss(y_rl, m_rl.predict_proba(X)[:, 1])),
+        "itb_brier": float(brier_score_loss(y_itb_home, m_itb.predict_proba(X)[:, 1])),
     }
     walk = evaluate_walk_forward(features_df)
 
@@ -153,7 +166,7 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
 
 def evaluate_walk_forward(features_df: pd.DataFrame) -> Dict[str, float]:
     """Out-of-sample evaluation via expanding-window CV."""
-    features_df = features_df.dropna(subset=["ml_home", "over85", "rl_home"]).reset_index(drop=True)
+    features_df = features_df.dropna(subset=["ml_home", "over85", "rl_home", "itb_home", "itb_away"]).reset_index(drop=True)
     if len(features_df) < 400:
         logger.warning("Not enough rows for walk-forward eval")
         return {}
@@ -161,8 +174,9 @@ def evaluate_walk_forward(features_df: pd.DataFrame) -> Dict[str, float]:
     y_ml = features_df["ml_home"].astype(int).values
     y_total = features_df["over85"].astype(int).values
     y_rl = features_df["rl_home"].astype(int).values
+    y_itb_home = features_df["itb_home"].astype(int).values
     tscv = TimeSeriesSplit(n_splits=5)
-    metrics: Dict[str, list] = {"ml_brier": [], "total_brier": [], "rl_brier": []}
+    metrics: Dict[str, list] = {"ml_brier": [], "total_brier": [], "rl_brier": [], "itb_brier": []}
     for tr, te in tscv.split(X):
         m = _make_estimator().fit(X[tr], y_ml[tr])
         metrics["ml_brier"].append(brier_score_loss(y_ml[te], m.predict_proba(X[te])[:, 1]))
@@ -170,4 +184,6 @@ def evaluate_walk_forward(features_df: pd.DataFrame) -> Dict[str, float]:
         metrics["total_brier"].append(brier_score_loss(y_total[te], m.predict_proba(X[te])[:, 1]))
         m = _make_estimator().fit(X[tr], y_rl[tr])
         metrics["rl_brier"].append(brier_score_loss(y_rl[te], m.predict_proba(X[te])[:, 1]))
+        m = _make_estimator().fit(X[tr], y_itb_home[tr])
+        metrics["itb_brier"].append(brier_score_loss(y_itb_home[te], m.predict_proba(X[te])[:, 1]))
     return {k: float(np.mean(v)) for k, v in metrics.items()}
