@@ -527,11 +527,12 @@ async def cb_lead(cb: CallbackQuery):
 
     if action == "approve":
         async with SessionLocal() as session:
+            pending = await session.get(PendingUser, uid)
+            uname = pending.username if pending else None
+            if pending:
+                await session.delete(pending)
             sub = await session.get(Subscriber, uid)
             if sub is None:
-                # Get name from pending
-                pending = await session.get(PendingUser, uid)
-                uname = pending.username if pending else None
                 session.add(Subscriber(chat_id=uid, active=True, notifications_enabled=True, username=uname))
             else:
                 sub.active = True
