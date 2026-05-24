@@ -39,6 +39,13 @@ async def _warmup(bot: Bot) -> None:
 
 
 async def main() -> None:
+    if not settings.telegram_bot_token:
+        logger.critical(
+            "TELEGRAM_BOT_TOKEN not set! "
+            "Go to Railway → Variables and add TELEGRAM_BOT_TOKEN=<your bot token>"
+        )
+        raise SystemExit(1)
+
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
