@@ -1,6 +1,4 @@
-"""AI ensemble: Claude analyses an MLB game using web data and returns
-independent probabilities blended with XGBoost predictions.
-"""
+"""AI ensemble: Claude analyses an MLB game and independently picks the best market + direction."""
 from __future__ import annotations
 
 import json
@@ -55,22 +53,23 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
 
 
 _PROMPT = """Ты — Elite Baseball Big Markets Quant Analyst.
-Специализация: крупные ликвидные рынки MLB — Moneyline (ML), Run Line (RL, ±1.5), Total Runs (Over/Under {total_line}).
-Стиль: исключительно холодный расчёт. Вероятности, Expected Value, edge, Bayesian uncertainty. Никаких эмоций.
+Специализация: крупные ликвидные рынки MLB — Moneyline (ML), Total Runs (Over/Under {total_line}), Individual Team Total Over (ITB {itb_line}).
+Стиль: исключительно холодный расчёт. Байесовская вероятность, Expected Value, edge. Никаких эмоций.
+Рассуждения СТРОГО на русском языке.
 
 ## ВХОДНЫЕ ДАННЫЕ
 
-### Prior от XGBoost-модели (твоя отправная точка):
+### Справочные вероятности XGBoost-модели:
 P(победа {home}) = {p_home:.0%} | P(победа {away}) = {p_away:.0%}
 P(тотал > {total_line}) = {p_over85:.0%}
-P({home} закроет Run Line −1.5) = {p_rl_home:.0%}
+P(хозяева > {itb_line} ранов) = {p_itb_home:.0%} | P(гости > {itb_line} ранов) = {p_itb_away:.0%}
 
-### Стартовые питчеры (сезонная статистика):
+### Стартовые питчеры:
 {home}: {home_pitcher_name} | ERA {home_era} | WHIP {home_whip} | K/9 {home_k9} | BB/9 {home_bb9}
 {away}: {away_pitcher_name} | ERA {away_era} | WHIP {away_whip} | K/9 {away_k9} | BB/9 {away_bb9}
-ERA diff (хозяева−гости): {era_diff:+.2f} | Статус данных: {pitcher_known}
+ERA diff (хозяева−гости): {era_diff:+.2f} | Статус: {pitcher_known}
 
-### Форма команд (скользящие 10 игр + Elo):
+### Форма команд:
 Elo: {home} {home_elo:.0f} vs {away} {away_elo:.0f}
 Win Rate: {home} {home_win_rate:.0%} vs {away} {away_win_rate:.0%}
 Раны: {home} {home_rs_avg:.1f} scored / {home_ra_avg:.1f} allowed
@@ -79,34 +78,27 @@ Win Rate: {home} {home_win_rate:.0%} vs {away} {away_win_rate:.0%}
 ### Свежие данные (веб-поиск: питчеры, буллпен, травмы, погода):
 {web_block}
 
-## АНАЛИЗ (рассуждай как Bayesian Hierarchical + Monte Carlo аналитик)
+## АНАЛИЗ
 
-**1. Park Factor + Weather:**
-По web_block определи стадион. Оцени Park Factor (нейтральный ≈1.0, Coors Field ≈1.15, petco park ≈0.85).
-Ветер >15 mph к центру поля добавляет +0.5–1.0 рана к тоталу, от поля — вычитает. Температура <10°C снижает тотал на 0.5–1.0.
+1. **Park Factor + Weather:** По web_block определи стадион. Park Factor (нейтральный ≈1.0, Coors Field ≈1.15, Petco Park ≈0.85). Ветер >15 mph к центру поля +0.5–1.0 рана к тоталу, от поля — вычитает. Температура <10°C снижает тотал.
 
-**2. Стартовые питчеры (главный фактор):**
-ERA < 3.50 — элита. ERA > 4.50 — слабый. WHIP < 1.15 — топ контроль.
-Если ERA diff > 0.75 в пользу одного питчера — это сильный сигнал.
-Проверь свежесть: если питчер не выходил последние 5+ дней — возможна накопленная нагрузка.
+2. **Стартовые питчеры (ключевой фактор):** ERA < 3.50 — элита. ERA > 4.50 — слабый. WHIP < 1.15 — топ контроль. ERA diff > 0.75 в пользу одной команды — сильный сигнал. Проверь свежесть по web_block.
 
-**3. Bullpen Fatigue + Tail Risk:**
-По web_block оцени усталость буллпенов (3+ игры подряд = повышенный риск).
-Tail Risk: вероятность коллапса (≥5 ER за ≤3 IP) — если риск высок, увеличь дисперсию тотала.
+3. **Буллпен + Tail Risk:** Усталость буллпена (3+ игры подряд). Риск коллапса (≥5 ER за ≤3 IP) — если высок, увеличь дисперсию тотала. По web_block проверь травмы ключевых игроков.
 
-**4. Bayesian Update:**
-Обнови prior от XGBoost:
-- Если ERA diff > 0.75 в пользу хозяев → сдвинь p_home на +3–7%
-- Если оба командных тотала высокие (rs_avg > 5.0) + открытый парк + ветер к CF → p_over85 вверх
-- Если буллпен соперника усталый → p_rl_home меняется соответственно
-- Если данных мало — минимальное отклонение от prior (±2–3%)
+4. **H2H + Home Advantage:** Очные встречи. Домашнее поле: стандарт +3–5% к вероятности.
 
-**5. EV и рекомендация:**
-edge = posterior_prob × book_odds − 1 (≥5% для валуя)
-k = 0.25–0.35 стандарт | 0.10–0.18 при высокой неопределённости (погода, усталость) | ≤0.08 пропустить
+5. **Выбор рынка:** Оцени все три рынка (ML, TOTAL, ITB). Выбери ОДИН рынок и направление с максимальным edge и наименьшей неопределённостью. Предпочитай рынок, где расхождение с моделью наиболее обосновано реальными данными (питчер, погода, буллпен). Если несколько рынков равнозначны — выбирай TOTAL как наиболее предсказуемый. Пороговый confidence для выбора: ≥ 0.55.
+
+Допустимые значения:
+- market: "ML" | "TOTAL" | "ITB"
+- pick для ML: "HOME" или "AWAY"
+- pick для TOTAL: "OVER" или "UNDER"
+- pick для ITB: "HOME_OVER" или "AWAY_OVER"
+- confidence: 0.50–0.90 (твоя итоговая вероятность этого исхода)
 
 Верни СТРОГО JSON без markdown:
-{{"p_home": float, "p_away": float, "p_over85": float, "p_rl_home": float, "reasoning": "2-3 предложения: главный аргумент (ERA питчеров + буллпен/парк), в чём расхождение с XGBoost-prior, лучший рынок"}}"""
+{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения на русском: главный аргумент (ERA/буллпен/парк/погода), почему именно этот рынок"}}"""
 
 
 def _format_web(results: list[dict]) -> str:
@@ -142,20 +134,27 @@ def _parse_json_strict(raw: str) -> Optional[dict]:
     return None
 
 
-def _validate_probs(d: dict) -> bool:
+_VALID_PICKS = {
+    "ML": {"HOME", "AWAY"},
+    "TOTAL": {"OVER", "UNDER"},
+    "ITB": {"HOME_OVER", "AWAY_OVER"},
+}
+
+
+def _validate_pick(d: dict) -> bool:
     if not isinstance(d, dict):
         return False
-    for key in ("p_home", "p_away", "p_over85", "p_rl_home"):
-        v = d.get(key)
-        if not isinstance(v, (int, float)):
-            return False
-        if v < 0 or v > 1.0:
-            return False
-    s = d["p_home"] + d["p_away"]
-    if s <= 0:
+    market = d.get("market")
+    pick = d.get("pick")
+    confidence = d.get("confidence")
+    if market not in _VALID_PICKS:
         return False
-    d["p_home"] = d["p_home"] / s
-    d["p_away"] = d["p_away"] / s
+    if pick not in _VALID_PICKS[market]:
+        return False
+    if not isinstance(confidence, (int, float)):
+        return False
+    if confidence < 0.50 or confidence > 1.0:
+        d["confidence"] = max(0.50, min(1.0, float(confidence)))
     return True
 
 
@@ -168,21 +167,23 @@ async def ai_predict(
     ml_probs: dict,
     features: dict,
 ) -> Optional[dict]:
-    """Returns {p_home, p_away, p_over85, p_rl_home, reasoning} or None."""
+    """Returns {market, pick, confidence, reasoning} or None."""
     from src.config import settings as cfg
     now = time.time()
     cached = _cache.get(match_id)
     if cached and now - cached[0] < _CACHE_TTL_SEC:
-        return cached[1]
+        if _validate_pick(cached[1]):
+            return cached[1]
 
     db_cached = await _db_cache_get(match_id)
-    if db_cached is not None:
+    if db_cached is not None and _validate_pick(db_cached):
         _cache[match_id] = (now, db_cached)
         return db_cached
 
     web_results = await tavily_search(
-        f"{home} vs {away} pitcher lineup injury MLB", days=5
+        f"{home} vs {away} pitcher lineup injury bullpen MLB", days=5
     )
+
     def _fmt_stat(v, fmt=".2f", unknown="н/д"):
         return format(v, fmt) if v is not None else unknown
 
@@ -195,11 +196,12 @@ async def ai_predict(
         home=home,
         away=away,
         total_line=cfg.total_line,
-        rl_line=cfg.rl_line,
+        itb_line=cfg.itb_line,
         p_home=ml_probs.get("p_home", 0.54),
         p_away=ml_probs.get("p_away", 0.46),
         p_over85=ml_probs.get("p_over85", 0.5),
-        p_rl_home=ml_probs.get("p_rl_home", 0.4),
+        p_itb_home=ml_probs.get("p_itb_home", 0.5),
+        p_itb_away=ml_probs.get("p_itb_away", 0.5),
         home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
         home_era=_fmt_stat(home_era),
         home_whip=_fmt_stat(features.get("home_pitcher_whip")),
@@ -229,15 +231,14 @@ async def ai_predict(
         return None
 
     parsed = _parse_json_strict(raw)
-    if not parsed or not _validate_probs(parsed):
-        logger.warning(f"ai_predict({match_id}): invalid JSON: {raw[:200]}")
+    if not parsed or not _validate_pick(parsed):
+        logger.warning(f"ai_predict({match_id}): invalid JSON or pick: {raw[:200]}")
         return None
 
     _cache[match_id] = (now, parsed)
     await _db_cache_put(match_id, parsed)
     logger.info(
-        f"ai_predict({match_id}): home={parsed['p_home']:.2f} "
-        f"away={parsed['p_away']:.2f} "
-        f"over85={parsed['p_over85']:.2f} rl={parsed['p_rl_home']:.2f}"
+        f"ai_predict({match_id}): {parsed['market']} {parsed['pick']} "
+        f"confidence={parsed['confidence']:.2f}"
     )
     return parsed

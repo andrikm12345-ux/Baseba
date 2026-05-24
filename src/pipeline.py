@@ -21,7 +21,7 @@ from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
 from src.data.settings_store import get_bool
 from src.ml.predict import Predictor
 from src.ml.train import train_all, save_all_to_db
-from src.signals.generator import Signal, generate
+from src.signals.generator import Signal, generate, _book_odds_for, _kelly, MAX_EDGE
 from src.signals.tracker import settle_pending
 
 
@@ -179,11 +179,15 @@ async def generate_and_broadcast(bot) -> int:
         logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} games")
 
     ai_match_ids: set[int] = set()
+    ai_signals: List[Signal] = []
     if await get_bool("ai_ensemble_enabled", False):
-        preds, ai_match_ids = await _apply_ai_ensemble(preds, feats)
+        ai_signals, ai_match_ids = await _apply_ai_ensemble(preds, feats)
 
-    preds["_ai_applied"] = preds["match_id"].isin(ai_match_ids)
-    signals = generate(preds)
+    # XGBoost сигналы только для игр без AI-выбора
+    preds_no_ai = preds[~preds["match_id"].isin(ai_match_ids)].copy()
+    preds_no_ai["_ai_applied"] = False
+    xgb_signals = generate(preds_no_ai)
+    signals = ai_signals + xgb_signals
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
     ai_on = await get_bool("ai_ensemble_enabled", False)
@@ -217,27 +221,81 @@ async def generate_and_broadcast(bot) -> int:
     return len(new_rows)
 
 
+def _ai_to_signal(ai_result: dict, preds_row: pd.Series) -> Signal | None:
+    """Конвертирует выбор AI {market, pick, confidence} в Signal с учётом коэффициентов."""
+    from src.config import settings as cfg
+
+    market = ai_result["market"]
+    pick = ai_result["pick"]
+    confidence = float(ai_result.get("confidence", 0.0))
+    if confidence < 0.50:
+        return None
+
+    fair_odds = 1.0 / max(confidence, 1e-6)
+    book = _book_odds_for(preds_row, market, pick)
+
+    if book is not None:
+        edge = confidence * book - 1.0
+        if edge < cfg.min_edge or edge > MAX_EDGE:
+            # edge вне диапазона — всё равно публикуем как MODEL без edge
+            return Signal(
+                match_id=int(preds_row["match_id"]),
+                market=market, pick=pick,
+                model_prob=confidence, fair_odds=fair_odds,
+                book_odds=float(book), edge=max(edge, 0.0),
+                confidence=confidence, stake_units=1.0,
+                is_value=False,
+            )
+        stake = _kelly(confidence, book)
+        return Signal(
+            match_id=int(preds_row["match_id"]),
+            market=market, pick=pick,
+            model_prob=confidence, fair_odds=fair_odds,
+            book_odds=float(book), edge=float(edge),
+            confidence=confidence,
+            stake_units=float(round(stake, 2)),
+            is_value=True,
+        )
+
+    # Без коэффициентов: ITB публикуем только с книгой
+    if market == "ITB":
+        return None
+    # ML/TOTAL без книги — MODEL сигнал при confidence >= 60%
+    if confidence < 0.60:
+        return None
+    return Signal(
+        match_id=int(preds_row["match_id"]),
+        market=market, pick=pick,
+        model_prob=confidence, fair_odds=fair_odds,
+        book_odds=0.0, edge=0.0,
+        confidence=confidence, stake_units=1.0,
+        is_value=False,
+    )
+
+
 async def _apply_ai_ensemble(
     preds: pd.DataFrame, feats: pd.DataFrame
-) -> tuple[pd.DataFrame, set[int]]:
+) -> tuple[List[Signal], set[int]]:
+    """Claude независимо выбирает рынок и направление для каждой игры.
+    Возвращает (список сигналов от AI, множество match_id где AI сработал)."""
     import asyncio
 
-    weight = settings.ai_ensemble_weight
     top_n = settings.ai_ensemble_top_n
     threshold = settings.ai_ensemble_min_prob
 
     feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
-    preds = preds.copy()
-    preds["_max_prob"] = preds[["p_home", "p_away"]].max(axis=1)
+    preds_idx = {int(r["match_id"]): r for _, r in preds.iterrows()}
+
+    preds_copy = preds.copy()
+    preds_copy["_max_prob"] = preds_copy[["p_home", "p_away"]].max(axis=1)
     candidates = (
-        preds[preds["_max_prob"] >= threshold]
+        preds_copy[preds_copy["_max_prob"] >= threshold]
         .sort_values("_max_prob", ascending=False)
         .head(top_n)
     )
-    preds.drop(columns=["_max_prob"], inplace=True)
 
     if candidates.empty:
-        return preds, set()
+        return [], set()
 
     async with SessionLocal() as session:
         existing_rows = (await session.execute(
@@ -270,11 +328,11 @@ async def _apply_ai_ensemble(
                 "p_home": float(row["p_home"]),
                 "p_away": float(row["p_away"]),
                 "p_over85": float(row["p_over85"]),
-                "p_rl_home": float(row["p_rl_home"]),
+                "p_itb_home": float(row.get("p_itb_home", 0.5)),
+                "p_itb_away": float(row.get("p_itb_away", 0.5)),
             }
             home, away, comp, match_obj = match_meta[mid]
             feat_dict = feats_by_id.get(mid, {})
-            # Enrich features with pitcher names from Match row
             feat_dict["home_pitcher_name"] = match_obj.home_pitcher_name
             feat_dict["away_pitcher_name"] = match_obj.away_pitcher_name
             ai = await ai_predict(
@@ -287,31 +345,27 @@ async def _apply_ai_ensemble(
 
     results = await asyncio.gather(*[_one(mid, r) for mid, r in tasks])
 
+    ai_signals: List[Signal] = []
     applied: set[int] = set()
-    diffs = []
     for mid, ai in results:
         if not ai:
             continue
-        mask = preds["match_id"] == mid
-        for col_pred, col_ai in [
-            ("p_home", "p_home"),
-            ("p_away", "p_away"),
-            ("p_over85", "p_over85"),
-            ("p_rl_home", "p_rl_home"),
-        ]:
-            ml_v = float(preds.loc[mask, col_pred].iloc[0])
-            ai_v = float(ai.get(col_ai, ml_v))
-            diffs.append(abs(ml_v - ai_v))
-            preds.loc[mask, col_pred] = (1 - weight) * ml_v + weight * ai_v
+        preds_row = preds_idx.get(mid)
+        if preds_row is None:
+            continue
+        sig = _ai_to_signal(ai, preds_row)
+        if sig is None:
+            continue
+        ai_signals.append(sig)
         applied.add(mid)
 
     if applied:
-        avg_diff = sum(diffs) / len(diffs) if diffs else 0
+        markets = [s.market for s in ai_signals]
         logger.info(
-            f"AI ensemble applied to {len(applied)}/{len(tasks)} games "
-            f"(weight={weight}, avg |ml-ai| = {avg_diff:.3f})"
+            f"AI ensemble: сгенерировано {len(ai_signals)} сигналов "
+            f"для {len(applied)}/{len(tasks)} игр — {markets}"
         )
-    return preds, applied
+    return ai_signals, applied
 
 
 async def daily_cycle(bot) -> None:
