@@ -11,6 +11,42 @@ from loguru import logger
 from src.config import MODELS_DIR
 from src.data.features import FEATURE_COLUMNS
 
+# Pairs of (home_col, away_col) that must be swapped to mirror the game perspective.
+_SWAP_PAIRS = [
+    ("home_elo", "away_elo"),
+    ("home_win_rate", "away_win_rate"),
+    ("home_rs_avg", "away_rs_avg"),
+    ("home_ra_avg", "away_ra_avg"),
+    ("home_rs_home_avg", "away_rs_away_avg"),
+    ("home_ra_home_avg", "away_ra_away_avg"),
+    ("h2h_home_avg_runs", "h2h_away_avg_runs"),
+    ("home_pitcher_era", "away_pitcher_era"),
+    ("home_pitcher_whip", "away_pitcher_whip"),
+    ("home_pitcher_k9", "away_pitcher_k9"),
+    ("home_pitcher_bb9", "away_pitcher_bb9"),
+]
+# Columns whose sign must be flipped (perspective reversal)
+_NEGATE_COLS = ["elo_diff", "era_diff", "whip_diff", "rest_diff"]
+# Columns that represent home win-rate fractions: mirror = 1 - value
+_FLIP_RATE_COLS = ["h2h_home_winrate", "h2h_recency_winrate"]
+
+
+def _mirror_features(X: np.ndarray) -> np.ndarray:
+    """Return feature matrix with home/away swapped to predict P(away wins by 2+)."""
+    col = {f: i for i, f in enumerate(FEATURE_COLUMNS)}
+    X2 = X.copy()
+    for a, b in _SWAP_PAIRS:
+        if a in col and b in col:
+            X2[:, col[a]] = X[:, col[b]]
+            X2[:, col[b]] = X[:, col[a]]
+    for c in _NEGATE_COLS:
+        if c in col:
+            X2[:, col[c]] = -X[:, col[c]]
+    for c in _FLIP_RATE_COLS:
+        if c in col:
+            X2[:, col[c]] = 1.0 - X[:, col[c]]
+    return X2
+
 
 async def restore_models_from_db() -> bool:
     """Download model blobs from DB to disk. Returns True if all 3 restored."""
@@ -70,9 +106,12 @@ class Predictor:
         p_ml = self.m_ml["model"].predict_proba(X)[:, 1]      # P(home wins)
         p_total = self.m_total["model"].predict_proba(X)[:, 1] # P(over 8.5 runs)
         p_rl = self.m_rl["model"].predict_proba(X)[:, 1]      # P(home covers -1.5)
+        X_mirror = _mirror_features(X)
+        p_rl_away = self.m_rl["model"].predict_proba(X_mirror)[:, 1]  # P(away covers -1.5)
         out = features_df[["match_id"]].copy()
         out["p_home"] = p_ml
         out["p_away"] = 1.0 - p_ml
         out["p_over85"] = p_total
         out["p_rl_home"] = p_rl
+        out["p_rl_away"] = p_rl_away
         return out

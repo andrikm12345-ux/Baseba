@@ -172,7 +172,8 @@ async def generate_and_broadcast(bot) -> int:
             odds_map = await fetch_odds_for_matches(odds_client, tuples)
         finally:
             await odds_client.close()
-        for col in ["odds_ml_home", "odds_ml_away", "odds_over85", "odds_under85", "odds_rl_home", "odds_rl_away"]:
+        for col in ["odds_ml_home", "odds_ml_away", "odds_over85", "odds_under85",
+                    "odds_rl_home", "odds_rl_away", "odds_rl_away_cover", "odds_rl_home_lay"]:
             preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
         logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} games")
 

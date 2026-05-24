@@ -65,12 +65,16 @@ def format_signal(
     kickoff = _msk(match.utc_date)
     market_label = MARKET_LABELS.get(signal.market, signal.market)
 
-    # RL pick показываем с именем команды
+    # RL pick показываем с именем команды и направлением форы
     if signal.market == "RL":
         if signal.pick == "COVER":
             pick_label = f"{home_name} −{settings.rl_line}"
-        else:
+        elif signal.pick == "LAY":
             pick_label = f"{away_name} +{settings.rl_line}"
+        elif signal.pick == "AWAY_COVER":
+            pick_label = f"{away_name} −{settings.rl_line}"
+        else:  # HOME_LAY
+            pick_label = f"{home_name} +{settings.rl_line}"
     else:
         pick_label = PICK_LABELS.get(signal.pick, signal.pick)
 
@@ -121,7 +125,14 @@ def format_signal_short(signals: list[Signal], matches: dict, teams: dict) -> st
         a_name = (away.short_name or away.name)[:12] if away else "?"
         market_label = MARKET_LABELS.get(s.market, s.market)
         if s.market == "RL":
-            pick_label = f"{h_name} −{settings.rl_line}" if s.pick == "COVER" else f"{a_name} +{settings.rl_line}"
+            if s.pick == "COVER":
+                pick_label = f"{h_name} −{settings.rl_line}"
+            elif s.pick == "LAY":
+                pick_label = f"{a_name} +{settings.rl_line}"
+            elif s.pick == "AWAY_COVER":
+                pick_label = f"{a_name} −{settings.rl_line}"
+            else:  # HOME_LAY
+                pick_label = f"{h_name} +{settings.rl_line}"
         else:
             pick_label = PICK_LABELS.get(s.pick, s.pick)
         badge = "🔥" if s.is_value else "📊"

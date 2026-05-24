@@ -243,8 +243,10 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
         "odds_ml_away": [],
         "odds_over85": [],
         "odds_under85": [],
-        "odds_rl_home": [],
-        "odds_rl_away": [],
+        "odds_rl_home": [],       # home -1.5 (hdp < 0)
+        "odds_rl_away": [],       # away +1.5 (hdp < 0)
+        "odds_rl_away_cover": [], # away -1.5 (hdp > 0)
+        "odds_rl_home_lay": [],   # home +1.5 (hdp > 0)
     }
 
     books = odds_payload.get("bookmakers") or {}
@@ -306,18 +308,20 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                         hdp_f = None
                     if hdp_f is None or abs(abs(hdp_f) - rl_line) > 0.26:
                         continue
-                    # Only use entries where home team is giving -1.5 (hdp < 0).
-                    # When hdp > 0, home is taking +1.5 and away is giving -1.5 —
-                    # that's the opposite market (away -1.5 / home +1.5) which doesn't
-                    # map to our COVER (home -1.5) / LAY (away +1.5) picks.
-                    if hdp_f > 0:
-                        continue
                     h = _as_float(entry.get("home"))
                     a = _as_float(entry.get("away"))
-                    if h and h < 15.0:
-                        aggregated["odds_rl_home"].append(h)
-                    if a and a < 15.0:
-                        aggregated["odds_rl_away"].append(a)
+                    if hdp_f < 0:
+                        # home -1.5 / away +1.5 (standard: home gives runs)
+                        if h and h < 15.0:
+                            aggregated["odds_rl_home"].append(h)
+                        if a and a < 15.0:
+                            aggregated["odds_rl_away"].append(a)
+                    else:
+                        # home +1.5 / away -1.5 (away is favourite, gives runs)
+                        if h and h < 15.0:
+                            aggregated["odds_rl_home_lay"].append(h)
+                        if a and a < 15.0:
+                            aggregated["odds_rl_away_cover"].append(a)
 
     return {k: (max(v) if v else 0.0) for k, v in aggregated.items()}
 
