@@ -341,11 +341,32 @@ async def cmd_refresh_odds(msg: Message):
     try:
         from src.pipeline import refresh_upcoming, generate_and_broadcast
         from src.signals.tracker import settle_pending
+        from sqlalchemy import select, func
+        from src.data.database import Signal, Match
+
         n = await refresh_upcoming(days=3)
-        await msg.answer(f"✅ Загружено {n} матчей. Закрываю сыгранные сигналы...")
+
+        # Диагностика: считаем сигналы и завершённые матчи
+        async with SessionLocal() as session:
+            total_sigs = (await session.execute(select(func.count()).select_from(Signal))).scalar()
+            unsettled = (await session.execute(
+                select(func.count()).select_from(Signal).where(Signal.settled.is_(False))
+            )).scalar()
+            finished_matches = (await session.execute(
+                select(func.count()).select_from(Match).where(Match.status == "FINISHED")
+            )).scalar()
+
+        await msg.answer(
+            f"✅ Загружено {n} матчей\n"
+            f"📊 Сигналов в БД: {total_sigs} (незакрытых: {unsettled})\n"
+            f"🏁 Завершённых матчей: {finished_matches}\n"
+            f"Закрываю сыгранные..."
+        )
         settled = await settle_pending()
-        if settled:
-            await msg.answer(f"✅ Закрыто {settled} сигналов. Генерирую новые...")
+        await msg.answer(
+            f"✅ Закрыто сигналов: {settled}\n"
+            f"Генерирую новые сигналы..."
+        )
         await generate_and_broadcast(msg.bot)
         await msg.answer("✅ Готово. Нажмите ⚾ Сигналы.", reply_markup=main_menu())
     except Exception as e:
