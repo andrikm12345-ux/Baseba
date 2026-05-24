@@ -25,7 +25,7 @@ from src.bot.formatters import (
     format_signal_short,
     format_training_report,
 )
-from src.bot.keyboards import admin_menu, main_menu, matches_kb, notifications_kb, signals_filter_kb
+from src.bot.keyboards import admin_menu, lead_kb, main_menu, matches_kb, notifications_kb, signals_filter_kb, user_remove_kb
 from src.config import settings
 from src.data.database import (
     AiPrediction,
@@ -40,6 +40,10 @@ from src.data.settings_store import get_bool, set_bool
 from src.signals.tracker import roi_stats
 
 router = Router()
+
+
+class AdminStates(StatesGroup):
+    waiting_user_id = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -459,16 +463,31 @@ async def cmd_download_csv(msg: Message):
 
 # ─── Admin commands ───────────────────────────────────────────────────────────
 
+async def _admin_menu_text_and_kb():
+    from sqlalchemy import func
+    ai_on = await get_bool("ai_ensemble_enabled", False)
+    async with SessionLocal() as session:
+        leads_count = (await session.execute(
+            select(func.count()).select_from(PendingUser)
+        )).scalar() or 0
+        users_count = (await session.execute(
+            select(func.count()).select_from(Subscriber).where(Subscriber.active.is_(True))
+        )).scalar() or 0
+    text = (
+        f"🔧 <b>Админ-панель</b>\n\n"
+        f"👥 Активных пользователей: <b>{users_count}</b>\n"
+        f"📋 Лидов (не одобрено): <b>{leads_count}</b>\n"
+        f"🤖 AI Ансамбль: {'✅ включён' if ai_on else '❌ выключен'}"
+    )
+    return text, admin_menu(leads_count=leads_count, ai_on=ai_on)
+
+
 @router.message(Command("admin"))
 async def cmd_admin(msg: Message):
     if not is_admin(msg.from_user.id):
         return
-    from src.data.settings_store import get_bool
-    ai_on = await get_bool("ai_ensemble_enabled", False)
-    await msg.answer(
-        f"🔧 Админ-панель\n🤖 AI Ансамбль: {'✅ включён' if ai_on else '❌ выключен'}",
-        reply_markup=admin_menu(),
-    )
+    text, kb = await _admin_menu_text_and_kb()
+    await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("train"))
@@ -535,13 +554,15 @@ async def cmd_debug_odds(msg: Message):
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
-async def cb_admin(cb: CallbackQuery):
+async def cb_admin(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
         await cb.answer("Нет доступа")
         return
     action = cb.data.split(":", 1)[1]
     if action == "users":
         await _admin_users(cb)
+    elif action == "leads":
+        await _admin_leads(cb)
     elif action == "ai_toggle":
         await _admin_ai_toggle(cb)
     elif action == "train":
@@ -552,21 +573,33 @@ async def cb_admin(cb: CallbackQuery):
             await train_models(bot=cb.bot)
         except Exception as e:
             await cb.message.answer(f"❌ Ошибка обучения: {e}")
-    elif action == "leads":
-        await _admin_leads(cb)
+    elif action == "add_user":
+        await state.set_state(AdminStates.waiting_user_id)
+        await cb.message.answer(
+            "Введите Telegram ID пользователя которого хотите добавить:\n"
+            "(или /cancel чтобы отменить)"
+        )
+        await cb.answer()
+    elif action == "close":
+        await cb.message.delete()
+        await cb.answer()
 
 
 async def _admin_users(cb: CallbackQuery):
     async with SessionLocal() as session:
         subs = (await session.execute(
-            select(Subscriber).where(Subscriber.active.is_(True))
+            select(Subscriber).where(Subscriber.active.is_(True)).order_by(Subscriber.subscribed_at.desc())
         )).scalars().all()
-    text = f"👥 Активных подписчиков: <b>{len(subs)}</b>\n\n"
+    if not subs:
+        await cb.message.answer("👥 Нет активных пользователей.")
+        await cb.answer()
+        return
+    await cb.message.answer(f"👥 <b>Активных пользователей: {len(subs)}</b>", parse_mode="HTML")
     for s in subs[:20]:
-        uname = f"@{s.username}" if s.username else str(s.chat_id)
+        uname = f"@{s.username}" if s.username else "—"
         notif = "🔔" if s.notifications_enabled else "🔕"
-        text += f"{notif} {uname}\n"
-    await cb.message.answer(text, parse_mode="HTML")
+        text = f"{notif} {uname}\n🆔 <code>{s.chat_id}</code>"
+        await cb.message.answer(text, parse_mode="HTML", reply_markup=user_remove_kb(s.chat_id))
     await cb.answer()
 
 
@@ -574,34 +607,158 @@ async def _admin_ai_toggle(cb: CallbackQuery):
     current = await get_bool("ai_ensemble_enabled", False)
     new_val = not current
     await set_bool("ai_ensemble_enabled", new_val)
-    state = "включён" if new_val else "выключен"
+    state = "включён ✅" if new_val else "выключен ❌"
     await cb.answer(f"AI ансамбль {state}", show_alert=True)
+    # Refresh admin menu
+    text, kb = await _admin_menu_text_and_kb()
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
 
 
 async def _admin_leads(cb: CallbackQuery):
     async with SessionLocal() as session:
         leads = (await session.execute(
-            select(PendingUser).order_by(PendingUser.last_seen_at.desc()).limit(15)
+            select(PendingUser).order_by(PendingUser.last_seen_at.desc()).limit(20)
         )).scalars().all()
     if not leads:
-        await cb.answer("Нет лидов")
+        await cb.answer("Нет лидов ✨", show_alert=True)
         return
-    lines = [f"📋 <b>Лиды ({len(leads)}):</b>\n"]
+    await cb.message.answer(f"📋 <b>Лидов: {len(leads)}</b>", parse_mode="HTML")
     for p in leads:
         name = p.first_name or ""
-        uname = f"@{p.username}" if p.username else str(p.chat_id)
-        lines.append(f"• {uname} {name} (посещений: {p.start_count})")
-    await cb.message.answer("\n".join(lines), parse_mode="HTML")
+        last = p.last_name or ""
+        uname = f"@{p.username}" if p.username else "—"
+        from src.bot.formatters import _msk
+        last_seen = _msk(p.last_seen_at) if p.last_seen_at else "?"
+        text = (
+            f"👤 {name} {last} {uname}\n"
+            f"🆔 <code>{p.chat_id}</code>\n"
+            f"🕐 {last_seen} | Попыток: {p.start_count}"
+        )
+        await cb.message.answer(text, parse_mode="HTML", reply_markup=lead_kb(p.chat_id))
     await cb.answer()
 
 
+# ─── Lead approve / deny ─────────────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("lead:"))
+async def cb_lead(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа")
+        return
+    parts = cb.data.split(":")
+    action, uid = parts[1], int(parts[2])
+
+    if action == "approve":
+        async with SessionLocal() as session:
+            sub = await session.get(Subscriber, uid)
+            if sub is None:
+                # Get name from pending
+                pending = await session.get(PendingUser, uid)
+                uname = pending.username if pending else None
+                session.add(Subscriber(chat_id=uid, active=True, notifications_enabled=True, username=uname))
+            else:
+                sub.active = True
+            await session.commit()
+        await cb.answer("✅ Одобрен!", show_alert=True)
+        await cb.message.edit_reply_markup(reply_markup=None)
+        await cb.message.answer(f"✅ Пользователь <code>{uid}</code> одобрен.", parse_mode="HTML")
+        try:
+            await cb.bot.send_message(
+                uid,
+                "✅ <b>Доступ одобрен!</b>\n\n"
+                "Нажмите /start чтобы начать пользоваться ботом.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    elif action == "deny":
+        async with SessionLocal() as session:
+            pending = await session.get(PendingUser, uid)
+            if pending:
+                await session.delete(pending)
+            await session.commit()
+        await cb.answer("❌ Отклонён", show_alert=True)
+        await cb.message.edit_reply_markup(reply_markup=None)
+        await cb.message.answer(f"❌ Лид <code>{uid}</code> удалён.", parse_mode="HTML")
+        try:
+            await cb.bot.send_message(
+                uid,
+                "❌ Ваша заявка отклонена.\n"
+                "Обратитесь к администратору если считаете это ошибкой.",
+            )
+        except Exception:
+            pass
+
+
+# ─── User remove ──────────────────────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("user:remove:"))
+async def cb_user_remove(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа")
+        return
+    uid = int(cb.data.split(":")[-1])
+    async with SessionLocal() as session:
+        sub = await session.get(Subscriber, uid)
+        if sub:
+            sub.active = False
+            await session.commit()
+    await cb.answer("🗑 Удалён", show_alert=True)
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(f"🗑 Доступ для <code>{uid}</code> закрыт.", parse_mode="HTML")
+    try:
+        await cb.bot.send_message(uid, "⛔ Ваш доступ к боту закрыт.")
+    except Exception:
+        pass
+
+
+# ─── FSM: Add user by ID ──────────────────────────────────────────────────────
+
+@router.message(AdminStates.waiting_user_id)
+async def fsm_add_user(msg: Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
+    text = msg.text.strip() if msg.text else ""
+    if text == "/cancel":
+        await state.clear()
+        await msg.answer("Отменено.")
+        return
+    try:
+        uid = int(text)
+    except ValueError:
+        await msg.answer("❌ Неверный формат. Введите числовой Telegram ID или /cancel.")
+        return
+    await state.clear()
+    async with SessionLocal() as session:
+        sub = await session.get(Subscriber, uid)
+        if sub is None:
+            session.add(Subscriber(chat_id=uid, active=True, notifications_enabled=True))
+        else:
+            sub.active = True
+        await session.commit()
+    await msg.answer(f"✅ Пользователь <code>{uid}</code> добавлен.", parse_mode="HTML")
+    try:
+        await msg.bot.send_message(
+            uid,
+            "✅ <b>Доступ одобрен!</b>\n\nНажмите /start чтобы начать.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# /allow and /deny kept as text commands for backwards-compat
 @router.message(Command("allow"))
 async def cmd_allow(msg: Message):
     if not is_admin(msg.from_user.id):
         return
     parts = msg.text.split()
     if len(parts) < 2:
-        await msg.answer("Использование: /allow <user_id>")
+        await msg.answer("Использование: /allow <user_id>\nИли используй /admin → Лиды")
         return
     try:
         uid = int(parts[1])
@@ -614,16 +771,10 @@ async def cmd_allow(msg: Message):
             session.add(Subscriber(chat_id=uid, active=True, notifications_enabled=True))
         else:
             sub.active = True
-            sub.notifications_enabled = True
         await session.commit()
-    await msg.answer(f"✅ Доступ предоставлен: {uid}")
+    await msg.answer(f"✅ Доступ предоставлен: <code>{uid}</code>", parse_mode="HTML")
     try:
-        from aiogram import Bot
-        bot = msg.bot
-        await bot.send_message(
-            uid,
-            "✅ Ваш доступ к боту подтверждён. Используйте /start",
-        )
+        await msg.bot.send_message(uid, "✅ <b>Доступ одобрен!</b>\n\nНажмите /start.", parse_mode="HTML")
     except Exception:
         pass
 
@@ -646,7 +797,7 @@ async def cmd_deny(msg: Message):
         if sub:
             sub.active = False
             await session.commit()
-    await msg.answer(f"🚫 Доступ закрыт: {uid}")
+    await msg.answer(f"🚫 Доступ закрыт: <code>{uid}</code>", parse_mode="HTML")
 
 
 # ─── Broadcasting ─────────────────────────────────────────────────────────────

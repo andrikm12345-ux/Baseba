@@ -5,6 +5,7 @@ import asyncio
 import os
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -73,7 +74,7 @@ async def main() -> None:
         await set_bool("ai_ensemble_enabled", True)
         logger.info("AI_ENSEMBLE env var persisted to DB")
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
     dp.include_router(router)
