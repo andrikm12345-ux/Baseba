@@ -306,6 +306,12 @@ def extract_odds(odds_payload: Dict[str, Any]) -> Dict[str, float]:
                         hdp_f = None
                     if hdp_f is None or abs(abs(hdp_f) - rl_line) > 0.26:
                         continue
+                    # Only use entries where home team is giving -1.5 (hdp < 0).
+                    # When hdp > 0, home is taking +1.5 and away is giving -1.5 —
+                    # that's the opposite market (away -1.5 / home +1.5) which doesn't
+                    # map to our COVER (home -1.5) / LAY (away +1.5) picks.
+                    if hdp_f > 0:
+                        continue
                     h = _as_float(entry.get("home"))
                     a = _as_float(entry.get("away"))
                     if h and h < 15.0:
