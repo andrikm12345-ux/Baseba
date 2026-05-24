@@ -340,8 +340,12 @@ async def cmd_refresh_odds(msg: Message):
     await msg.answer("🔄 Запускаю обновление расписания...")
     try:
         from src.pipeline import refresh_upcoming, generate_and_broadcast
+        from src.signals.tracker import settle_pending
         n = await refresh_upcoming(days=3)
-        await msg.answer(f"✅ Загружено {n} матчей. Генерирую сигналы...")
+        await msg.answer(f"✅ Загружено {n} матчей. Закрываю сыгранные сигналы...")
+        settled = await settle_pending()
+        if settled:
+            await msg.answer(f"✅ Закрыто {settled} сигналов. Генерирую новые...")
         await generate_and_broadcast(msg.bot)
         await msg.answer("✅ Готово. Нажмите ⚾ Сигналы.", reply_markup=main_menu())
     except Exception as e:
