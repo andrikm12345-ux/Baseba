@@ -308,12 +308,12 @@ async def cmd_refresh_odds(msg: Message):
             )).scalar()
             # Next game without a signal yet (exclude already-signaled matches)
             now_utc = datetime.utcnow()
-            signaled_ids_q = select(Signal.match_id).distinct()
+            signaled_ids_sq = select(Signal.match_id).distinct().scalar_subquery()
             next_game = (await session.execute(
                 select(Match).where(
                     Match.status != "FINISHED",
                     Match.utc_date > now_utc,
-                    Match.id.not_in(signaled_ids_q),
+                    Match.id.not_in(signaled_ids_sq),
                 ).order_by(Match.utc_date).limit(1)
             )).scalar_one_or_none()
 
