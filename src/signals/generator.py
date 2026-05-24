@@ -86,18 +86,14 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
             total_pick, total_prob = "UNDER", float(1.0 - row["p_over85"])
         out.extend(_make_signal(row, "TOTAL", total_pick, total_prob))
 
-        # Run Line — home perspective (home -1.5 / away +1.5)
-        if row["p_rl_home"] >= 0.5:
+        # Run Line — генерируем только −1.5 сторону (команда побеждает с разрывом 2+)
+        # COVER = хозяева −1.5, AWAY_COVER = гости −1.5
+        # +1.5 (LAY / HOME_LAY) не сигналим — это страховочная ставка без настоящего edge
+        if row["p_rl_home"] >= settings.min_confidence:
             out.extend(_make_signal(row, "RL", "COVER", float(row["p_rl_home"])))
-        else:
-            out.extend(_make_signal(row, "RL", "LAY", float(1.0 - row["p_rl_home"])))
-
-        # Run Line — away perspective (away -1.5 / home +1.5)
         p_rl_away = float(row.get("p_rl_away", 0.0))
-        if p_rl_away >= 0.5:
+        if p_rl_away >= settings.min_confidence:
             out.extend(_make_signal(row, "RL", "AWAY_COVER", p_rl_away))
-        else:
-            out.extend(_make_signal(row, "RL", "HOME_LAY", 1.0 - p_rl_away))
 
     return out
 
