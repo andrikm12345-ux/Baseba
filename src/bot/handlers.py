@@ -80,12 +80,14 @@ async def cmd_help(msg: Message):
 @router.message(Command("signals"))
 @router.message(lambda m: m.text == "⚾ Сигналы")
 async def cmd_signals(msg: Message):
-    await msg.answer("Фильтр сигналов:", reply_markup=signals_filter_kb())
+    await _show_signals(msg, flt="all")
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("filter:"))
-async def cb_filter(cb: CallbackQuery):
-    flt = cb.data.split(":", 1)[1]
+async def _show_signals(event, flt: str = "all"):
+    """Show signals — works with both Message and CallbackQuery."""
+    is_cb = isinstance(event, CallbackQuery)
+    send = event.message.answer if is_cb else event.answer
+
     horizon = datetime.utcnow() - timedelta(days=7)
     async with SessionLocal() as session:
         q = select(Signal).join(Match).where(
@@ -101,11 +103,13 @@ async def cb_filter(cb: CallbackQuery):
             q = q.where(Signal.book_odds > 1.0)
         signals: List[Signal] = list((await session.execute(q)).scalars())
         if not signals:
-            await cb.message.edit_text(
-                "Нет сигналов за последние 7 дней.\n\n"
-                "Нажмите <b>🔄 Обновить коэффы</b> чтобы запустить генерацию.",
+            await send(
+                "Сигналов за последние 7 дней нет.\n\n"
+                "Нажмите <b>🔄 Запустить анализ</b> — бот проверит ближайшие игры.",
                 parse_mode="HTML",
             )
+            if is_cb:
+                await event.answer()
             return
         ai_on = await get_bool("ai_ensemble_enabled", False)
         texts = []
@@ -120,11 +124,14 @@ async def cb_filter(cb: CallbackQuery):
                 ai_comment = s.commentary
             texts.append(format_signal(s, match, home, away, ai_comment))
     if not texts:
-        await cb.message.edit_text("Нет сигналов.")
+        await send("Нет сигналов.")
+        if is_cb:
+            await event.answer()
         return
     for text in texts[:5]:
-        await cb.message.answer(text, parse_mode="HTML")
-    await cb.answer()
+        await send(text, parse_mode="HTML")
+    if is_cb:
+        await event.answer()
 
 
 @router.message(Command("today"))
@@ -344,7 +351,7 @@ async def cmd_kelly(msg: Message):
     await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
-@router.message(lambda m: m.text == "🔄 Обновить коэффы")
+@router.message(lambda m: m.text == "🔄 Запустить анализ")
 async def cmd_refresh_odds(msg: Message):
     await msg.answer("🔄 Запускаю обновление расписания...")
     try:

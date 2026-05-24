@@ -7,7 +7,7 @@ def main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="⚾ Сигналы"), KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="📅 Матчи сегодня"), KeyboardButton(text="📈 Кривая ROI")],
             [KeyboardButton(text="📋 Анализ матча"), KeyboardButton(text="💰 Расчёт Kelly")],
-            [KeyboardButton(text="🔄 Обновить коэффы"), KeyboardButton(text="📥 Скачать CSV")],
+            [KeyboardButton(text="🔄 Запустить анализ"), KeyboardButton(text="📥 Скачать CSV")],
             [KeyboardButton(text="ℹ️ Помощь"), KeyboardButton(text="🔔 Уведомления")],
         ],
         resize_keyboard=True,
