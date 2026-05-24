@@ -135,33 +135,56 @@ async def _show_signals(event, flt: str = "all"):
 @router.message(Command("today"))
 @router.message(lambda m: m.text == "📅 Сегодня")
 async def cmd_today(msg: Message):
-    # Use MSK date boundaries: MSK midnight = UTC -3h = yesterday 21:00 UTC
     msk = timezone(timedelta(hours=3))
     now_msk = datetime.now(msk)
     msk_today_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
-    # Show from MSK yesterday 06:00 to cover last night's games too
     start = (msk_today_start - timedelta(hours=18)).astimezone(timezone.utc).replace(tzinfo=None)
     end = (msk_today_start + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
+
     async with SessionLocal() as session:
         rows = (await session.execute(
-            select(Match).where(Match.utc_date >= start, Match.utc_date < end).order_by(Match.utc_date).limit(20)
+            select(Match).where(Match.utc_date >= start, Match.utc_date < end).order_by(Match.utc_date)
         )).scalars().all()
-        if not rows:
-            await msg.answer("Нет игр MLB на сегодня.")
-            return
-        lines = ["📅 <b>Игры MLB сегодня:</b>\n"]
-        for m in rows:
-            home = await session.get(Team, m.home_team_id)
-            away = await session.get(Team, m.away_team_id)
-            h = home.short_name or home.name if home else "?"
-            a = away.short_name or away.name if away else "?"
-            dt_str = _msk(m.utc_date)
-            if m.status == "FINISHED":
-                status = f" ✅ {m.home_runs}:{m.away_runs}"
-            else:
-                status = " 🕐"
-            lines.append(f"⚾ {h} vs {a}  {dt_str}{status}")
-    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+    if not rows:
+        await msg.answer("Нет игр MLB на сегодня.")
+        return
+
+    finished = [m for m in rows if m.status == "FINISHED"]
+    upcoming = [m for m in rows if m.status != "FINISHED"]
+
+    parts = []
+
+    if finished:
+        lines = [f"✅ <b>Результаты ({len(finished)}):</b>\n"]
+        async with SessionLocal() as session:
+            for m in finished:
+                home = await session.get(Team, m.home_team_id)
+                away = await session.get(Team, m.away_team_id)
+                h = home.short_name or home.name if home else "?"
+                a = away.short_name or away.name if away else "?"
+                lines.append(f"⚾ {h} {m.home_runs}  —  {m.away_runs} {a}")
+        parts.append("\n".join(lines))
+
+    if upcoming:
+        lines = [f"🕐 <b>Предстоящие ({len(upcoming)}):</b>\n"]
+        async with SessionLocal() as session:
+            for m in upcoming:
+                home = await session.get(Team, m.home_team_id)
+                away = await session.get(Team, m.away_team_id)
+                h = home.short_name or home.name if home else "?"
+                a = away.short_name or away.name if away else "?"
+                dt_str = _msk(m.utc_date)
+                pitcher = ""
+                if m.home_pitcher_name or m.away_pitcher_name:
+                    hp = m.home_pitcher_name or "?"
+                    ap = m.away_pitcher_name or "?"
+                    pitcher = f"\n   ↳ {hp} vs {ap}"
+                lines.append(f"⚾ {h} vs {a}  {dt_str}{pitcher}")
+        parts.append("\n".join(lines))
+
+    for part in parts:
+        await msg.answer(part, parse_mode="HTML")
 
 
 @router.message(Command("stats"))
