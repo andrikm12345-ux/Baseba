@@ -45,6 +45,28 @@ async def _warmup(bot: Bot) -> None:
         logger.error(f"Warmup failed (bot will still work): {e}")
 
 
+async def _notify_startup(bot: Bot) -> None:
+    if not settings.admin_ids:
+        return
+    from datetime import datetime, timezone, timedelta
+    commit = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")[:7] or "dev"
+    branch = os.environ.get("RAILWAY_GIT_BRANCH", "")
+    now_msk = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M МСК")
+    version_line = f"<code>{commit}</code>"
+    if branch:
+        version_line += f" ({branch})"
+    text = (
+        f"🚀 <b>Бот запущен</b>\n"
+        f"🕐 {now_msk}\n"
+        f"📦 Версия: {version_line}"
+    )
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 async def main() -> None:
     if not settings.telegram_bot_token:
         logger.critical(
@@ -90,6 +112,7 @@ async def main() -> None:
     scheduler.start()
 
     asyncio.create_task(_warmup(bot))
+    asyncio.create_task(_notify_startup(bot))
     logger.info("Scheduler started — MLB Baseball Signals bot is running")
 
     await dp.start_polling(bot)
