@@ -81,7 +81,7 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler(timezone=settings.tz)
     scheduler.add_job(daily_cycle, "cron", hour=4, minute=0, args=[bot], id="daily")
-    scheduler.add_job(generate_and_broadcast, "interval", hours=1, args=[bot], id="signals_loop")
+    scheduler.add_job(generate_and_broadcast, "interval", minutes=30, args=[bot], id="signals_loop")
     scheduler.add_job(settle_pending, "interval", minutes=20, id="settle")
     # Каждые 30 мин обновляем статусы матчей (FINISHED + финальный счёт).
     # Игры MLB идут ~3 часа — нужно быстро получать результаты для settle.

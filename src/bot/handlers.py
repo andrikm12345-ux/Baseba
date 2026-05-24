@@ -306,12 +306,14 @@ async def cmd_refresh_odds(msg: Message):
             finished_matches = (await session.execute(
                 select(func.count()).select_from(Match).where(Match.status == "FINISHED")
             )).scalar()
-            # Ближайшая незавершённая игра
+            # Next game without a signal yet (exclude already-signaled matches)
             now_utc = datetime.utcnow()
+            signaled_ids_q = select(Signal.match_id).distinct()
             next_game = (await session.execute(
                 select(Match).where(
                     Match.status != "FINISHED",
                     Match.utc_date > now_utc,
+                    Match.id.not_in(signaled_ids_q),
                 ).order_by(Match.utc_date).limit(1)
             )).scalar_one_or_none()
 
@@ -319,11 +321,14 @@ async def cmd_refresh_odds(msg: Message):
         next_signal_hint = ""
         if next_game:
             signal_time = next_game.utc_date - timedelta(hours=3)
-            msk_time = (signal_time.replace(tzinfo=timezone.utc)
-                        .astimezone(timezone(timedelta(hours=3)))).strftime("%H:%M МСК")
             game_msk = (next_game.utc_date.replace(tzinfo=timezone.utc)
                         .astimezone(timezone(timedelta(hours=3)))).strftime("%d.%m %H:%M МСК")
-            next_signal_hint = f"\n⏰ Следующий сигнал ожидается в ~{msk_time} (игра в {game_msk})"
+            if signal_time <= now_utc:
+                next_signal_hint = f"\n⏰ Сигнал для игры {game_msk} будет при следующей проверке"
+            else:
+                msk_time = (signal_time.replace(tzinfo=timezone.utc)
+                            .astimezone(timezone(timedelta(hours=3)))).strftime("%H:%M МСК")
+                next_signal_hint = f"\n⏰ Следующий сигнал ожидается в ~{msk_time} (игра в {game_msk})"
 
         await msg.answer(
             f"✅ Загружено {n} матчей\n"
