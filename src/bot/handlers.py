@@ -186,6 +186,13 @@ async def cmd_today(msg: Message):
     for part in parts:
         await msg.answer(part, parse_mode="HTML")
 
+    if upcoming:
+        await msg.answer(
+            "⚠️ <i>Стартовые питчеры могут измениться в последний момент — "
+            "травма или ротация. Сверяйтесь ближе к первому питчу.</i>",
+            parse_mode="HTML",
+        )
+
 
 @router.message(Command("stats"))
 @router.message(lambda m: m.text == "📊 Статистика")

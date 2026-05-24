@@ -94,6 +94,9 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
     return out
 
 
+MAX_EDGE = 0.40  # cap unrealistic edges from exchange lay prices
+
+
 def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Signal]:
     ai_applied = bool(row.get("_ai_applied", False))
     floor = 0.40 if ai_applied else settings.min_confidence
@@ -105,7 +108,7 @@ def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Si
         if book < settings.min_odds or book > settings.max_odds:
             return []
         edge = prob * book - 1.0
-        if edge < settings.min_edge:
+        if edge < settings.min_edge or edge > MAX_EDGE:
             return []
         stake = _kelly(prob, book)
         return [Signal(
