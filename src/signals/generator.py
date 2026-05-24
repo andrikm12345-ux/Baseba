@@ -72,7 +72,7 @@ def _book_odds_for(row: pd.Series, market: str, pick: str) -> Optional[float]:
 
 def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
     """predictions_with_odds expects: match_id, p_home, p_away, p_over85,
-    p_rl_home, p_rl_away, plus optional odds columns."""
+    plus optional odds_ml_home, odds_ml_away, odds_over85, odds_under85 columns."""
     out: List[Signal] = []
     for _, row in predictions_with_odds.iterrows():
         # Moneyline
@@ -85,15 +85,6 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
         else:
             total_pick, total_prob = "UNDER", float(1.0 - row["p_over85"])
         out.extend(_make_signal(row, "TOTAL", total_pick, total_prob))
-
-        # Run Line — генерируем только −1.5 сторону (команда побеждает с разрывом 2+)
-        # COVER = хозяева −1.5, AWAY_COVER = гости −1.5
-        # +1.5 (LAY / HOME_LAY) не сигналим — это страховочная ставка без настоящего edge
-        if row["p_rl_home"] >= settings.min_confidence:
-            out.extend(_make_signal(row, "RL", "COVER", float(row["p_rl_home"])))
-        p_rl_away = float(row.get("p_rl_away", 0.0))
-        if p_rl_away >= settings.min_confidence:
-            out.extend(_make_signal(row, "RL", "AWAY_COVER", p_rl_away))
 
     return out
 

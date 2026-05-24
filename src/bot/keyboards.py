@@ -19,9 +19,6 @@ def signals_filter_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Все", callback_data="filter:all"),
             InlineKeyboardButton(text="Мани-лайн", callback_data="filter:ML"),
             InlineKeyboardButton(text="Тотал", callback_data="filter:TOTAL"),
-        ],
-        [
-            InlineKeyboardButton(text="Ран-лайн", callback_data="filter:RL"),
             InlineKeyboardButton(text="Только VALUE", callback_data="filter:value"),
         ],
     ])
