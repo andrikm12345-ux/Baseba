@@ -339,12 +339,17 @@ async def cmd_kelly(msg: Message):
 async def cmd_refresh_odds(msg: Message):
     await msg.answer("🔄 Запускаю обновление расписания...")
     try:
-        from src.pipeline import refresh_upcoming, generate_and_broadcast
+        from src.pipeline import refresh_upcoming, generate_and_broadcast, train_models
         from src.signals.tracker import settle_pending
+        from src.ml.predict import Predictor
         from sqlalchemy import select, func
         from src.data.database import Signal, Match
 
         n = await refresh_upcoming(days=3)
+
+        # Статус моделей
+        predictor = Predictor()
+        models_ready = predictor.ready
 
         # Диагностика: считаем сигналы и завершённые матчи
         async with SessionLocal() as session:
@@ -355,20 +360,58 @@ async def cmd_refresh_odds(msg: Message):
             finished_matches = (await session.execute(
                 select(func.count()).select_from(Match).where(Match.status == "FINISHED")
             )).scalar()
+            # Ближайшая незавершённая игра
+            now_utc = datetime.utcnow()
+            next_game = (await session.execute(
+                select(Match).where(
+                    Match.status != "FINISHED",
+                    Match.utc_date > now_utc,
+                ).order_by(Match.utc_date).limit(1)
+            )).scalar_one_or_none()
+
+        model_status = "✅ готовы" if models_ready else "⏳ ещё обучаются"
+        next_signal_hint = ""
+        if next_game:
+            signal_time = next_game.utc_date - timedelta(hours=3)
+            msk_time = (signal_time.replace(tzinfo=timezone.utc)
+                        .astimezone(timezone(timedelta(hours=3)))).strftime("%H:%M МСК")
+            game_msk = (next_game.utc_date.replace(tzinfo=timezone.utc)
+                        .astimezone(timezone(timedelta(hours=3)))).strftime("%d.%m %H:%M МСК")
+            next_signal_hint = f"\n⏰ Следующий сигнал ожидается в ~{msk_time} (игра в {game_msk})"
 
         await msg.answer(
             f"✅ Загружено {n} матчей\n"
+            f"🤖 Модели: {model_status}\n"
             f"📊 Сигналов в БД: {total_sigs} (незакрытых: {unsettled})\n"
-            f"🏁 Завершённых матчей: {finished_matches}\n"
+            f"🏁 Завершённых матчей: {finished_matches}"
+            f"{next_signal_hint}\n\n"
             f"Закрываю сыгранные..."
         )
+
+        # Если модели не готовы — запускаем обучение в фоне
+        if not models_ready and finished_matches >= 200:
+            await msg.answer(
+                "⚙️ Модели не найдены — запускаю обучение в фоне (~5 мин).\n"
+                "Придёт уведомление когда готово. Сигналы появятся после обучения."
+            )
+            import asyncio as _aio
+            _aio.create_task(train_models(bot=msg.bot))
+
         settled = await settle_pending()
         await msg.answer(
             f"✅ Закрыто сигналов: {settled}\n"
             f"Генерирую новые сигналы..."
         )
-        await generate_and_broadcast(msg.bot)
-        await msg.answer("✅ Готово. Нажмите ⚾ Сигналы.", reply_markup=main_menu())
+        new_count = await generate_and_broadcast(msg.bot)
+        if new_count == 0:
+            await msg.answer(
+                f"📭 Новых сигналов нет — нет игр в окне ±3 ч от текущего времени."
+                f"{next_signal_hint}\n\n"
+                "Сигналы появятся автоматически за 3 часа до начала игры.",
+                reply_markup=main_menu(),
+            )
+        else:
+            await msg.answer(f"✅ Отправлено {new_count} новых сигналов.", reply_markup=main_menu())
     except Exception as e:
         logger.error(f"refresh error: {e}")
         await msg.answer(f"❌ Ошибка: {e}")

@@ -12,6 +12,33 @@ from src.config import MODELS_DIR
 from src.data.features import FEATURE_COLUMNS
 
 
+async def restore_models_from_db() -> bool:
+    """Download model blobs from DB to disk. Returns True if all 3 restored."""
+    try:
+        from src.data.database import ModelBlob, SessionLocal
+        restored = 0
+        async with SessionLocal() as session:
+            for name, filename in [
+                ("model_ml", "model_ml.joblib"),
+                ("model_total", "model_total.joblib"),
+                ("model_rl", "model_rl.joblib"),
+            ]:
+                path = MODELS_DIR / filename
+                if path.exists():
+                    restored += 1
+                    continue
+                blob = await session.get(ModelBlob, name)
+                if blob and blob.data:
+                    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(blob.data)
+                    logger.info(f"Model '{name}' restored from DB ({len(blob.data)//1024} KB)")
+                    restored += 1
+        return restored == 3
+    except Exception as e:
+        logger.warning(f"restore_models_from_db failed: {e}")
+        return False
+
+
 class Predictor:
     def __init__(self) -> None:
         self.m_ml = self._load(MODELS_DIR / "model_ml.joblib")

@@ -10,6 +10,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -150,9 +151,19 @@ class AiPrediction(Base):
     payload: Mapped[str] = mapped_column(String)
 
 
+class ModelBlob(Base):
+    """Stores trained ML model files as binary blobs for persistence across restarts."""
+    __tablename__ = "model_blobs"
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)  # e.g. "model_ml"
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # model_blobs: created by metadata.create_all for new installs;
+        # for existing DBs that predate this table, create_all is idempotent.
         try:
             await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS commentary TEXT"))
         except Exception as e:

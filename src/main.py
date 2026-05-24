@@ -13,7 +13,7 @@ from src.bot.access import AccessMiddleware
 from src.bot.handlers import broadcast_morning_digest, router
 from src.config import settings
 from src.data.database import init_db
-from src.ml.predict import Predictor
+from src.ml.predict import Predictor, restore_models_from_db
 from src.pipeline import (
     bootstrap_history,
     daily_cycle,
@@ -26,13 +26,18 @@ from src.signals.tracker import settle_pending
 
 async def _warmup(bot: Bot) -> None:
     try:
-        predictor = Predictor()
-        if not predictor.ready:
-            logger.info("Cold start — bootstrapping MLB history...")
-            await bootstrap_history()
-            await train_models(bot=bot)
+        # Try to restore model files from database (persisted from previous run)
+        if not Predictor().ready:
+            logger.info("Models not on disk — trying to restore from database...")
+            restored = await restore_models_from_db()
+            if restored:
+                logger.info("Models restored from DB successfully")
+            else:
+                logger.info("No models in DB — cold start: bootstrapping MLB history...")
+                await bootstrap_history()
+                await train_models(bot=bot)
         else:
-            logger.info("Models found — running incremental refresh")
+            logger.info("Models found on disk — running incremental refresh")
             await refresh_upcoming(days=7)
     except Exception as e:
         logger.error(f"Warmup failed (bot will still work): {e}")

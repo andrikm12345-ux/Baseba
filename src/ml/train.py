@@ -1,6 +1,7 @@
 """Train three calibrated XGBoost models for MLB baseball: ML, TOTAL, RL."""
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -16,6 +17,25 @@ from xgboost import XGBClassifier
 
 from src.config import MODELS_DIR
 from src.data.features import FEATURE_COLUMNS
+
+
+async def _save_model_to_db(name: str, path: Path) -> None:
+    """Save a joblib model file as binary blob in the database."""
+    try:
+        from src.data.database import ModelBlob, SessionLocal
+        data = path.read_bytes()
+        async with SessionLocal() as session:
+            existing = await session.get(ModelBlob, name)
+            if existing is None:
+                session.add(ModelBlob(name=name, data=data))
+            else:
+                existing.data = data
+                from datetime import datetime
+                existing.updated_at = datetime.utcnow()
+            await session.commit()
+        logger.info(f"Model '{name}' saved to database ({len(data)//1024} KB)")
+    except Exception as e:
+        logger.warning(f"Could not save model '{name}' to DB: {e}")
 
 
 def _make_estimator() -> XGBClassifier:
@@ -42,6 +62,14 @@ def _train_one(X: pd.DataFrame, y: np.ndarray, name: str) -> CalibratedClassifie
     bs = brier_score_loss(y, proba)
     logger.info(f"[{name}] in-sample Brier={bs:.4f}")
     return cal
+
+
+async def save_all_to_db() -> None:
+    """Save all model files to DB (call after train_all)."""
+    for name, filename in [("model_ml", "model_ml.joblib"), ("model_total", "model_total.joblib"), ("model_rl", "model_rl.joblib")]:
+        p = MODELS_DIR / filename
+        if p.exists():
+            await _save_model_to_db(name, p)
 
 
 def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:

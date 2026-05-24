@@ -20,7 +20,7 @@ from src.data.ingest import ingest_history, ingest_upcoming
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
 from src.data.settings_store import get_bool
 from src.ml.predict import Predictor
-from src.ml.train import train_all
+from src.ml.train import train_all, save_all_to_db
 from src.signals.generator import Signal, generate
 from src.signals.tracker import settle_pending
 
@@ -88,6 +88,8 @@ async def train_models(bot=None) -> None:
     features = build_features(finished)
     result = train_all(features)
     logger.info(f"Models saved: {result['paths']}")
+    # Persist model files to database so they survive Railway restarts
+    await save_all_to_db()
     if bot:
         text = format_training_report(result["metrics"])
         for admin_id in settings.admin_ids:
