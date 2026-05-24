@@ -180,13 +180,22 @@ def format_roi_stats(model_stats, value_stats, ai_stats) -> str:
             f"{sign}{s.profit:.1f} ед."
         )
 
-    return "\n".join([
+    all_empty = model_stats.n_settled == 0 and value_stats.n_settled == 0 and ai_stats.n_settled == 0
+    lines = [
         "📊 <b>Статистика сигналов</b>",
         "",
         _row("📊 MODEL (без коэффа)", model_stats),
         _row("🔥 VALUE (с edge)", value_stats),
         _row("🤖 AI-ансамбль", ai_stats),
-    ])
+    ]
+    if all_empty:
+        lines += [
+            "",
+            "<i>ℹ️ Статистика накапливается по мере работы бота.</i>",
+            "<i>Данные появятся после того, как первые сигналы сыграют.</i>",
+            "<i>Сигналы генерируются за 3 ч до игры, закрываются автоматически.</i>",
+        ]
+    return "\n".join(lines)
 
 
 WELCOME_TEXT = """⚾ <b>Бейсбол Сигналы — MLB Bot</b>

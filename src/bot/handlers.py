@@ -126,12 +126,16 @@ async def cb_filter(cb: CallbackQuery):
 @router.message(Command("today"))
 @router.message(lambda m: m.text == "📅 Матчи сегодня")
 async def cmd_today(msg: Message):
-    today = datetime.utcnow().date()
-    start = datetime.combine(today, datetime.min.time())
-    end = start + timedelta(days=1)
+    # Use MSK date boundaries: MSK midnight = UTC -3h = yesterday 21:00 UTC
+    msk = timezone(timedelta(hours=3))
+    now_msk = datetime.now(msk)
+    msk_today_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Show from MSK yesterday 06:00 to cover last night's games too
+    start = (msk_today_start - timedelta(hours=18)).astimezone(timezone.utc).replace(tzinfo=None)
+    end = (msk_today_start + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
     async with SessionLocal() as session:
         rows = (await session.execute(
-            select(Match).where(Match.utc_date >= start, Match.utc_date < end).order_by(Match.utc_date).limit(15)
+            select(Match).where(Match.utc_date >= start, Match.utc_date < end).order_by(Match.utc_date).limit(20)
         )).scalars().all()
         if not rows:
             await msg.answer("Нет игр MLB на сегодня.")
@@ -143,9 +147,10 @@ async def cmd_today(msg: Message):
             h = home.short_name or home.name if home else "?"
             a = away.short_name or away.name if away else "?"
             dt_str = _msk(m.utc_date)
-            status = ""
             if m.status == "FINISHED":
-                status = f" | {m.home_runs}:{m.away_runs}"
+                status = f" ✅ {m.home_runs}:{m.away_runs}"
+            else:
+                status = " 🕐"
             lines.append(f"⚾ {h} vs {a}  {dt_str}{status}")
     await msg.answer("\n".join(lines), parse_mode="HTML")
 
