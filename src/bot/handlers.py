@@ -1,8 +1,6 @@
 """Telegram command handlers for the MLB Baseball bot."""
 from __future__ import annotations
 
-import csv
-import io
 import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -11,7 +9,7 @@ from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 from loguru import logger
 from sqlalchemy import select
 
@@ -25,7 +23,7 @@ from src.bot.formatters import (
     format_signal_short,
     format_training_report,
 )
-from src.bot.keyboards import admin_menu, lead_kb, main_menu, matches_kb, notifications_kb, signals_filter_kb, user_remove_kb
+from src.bot.keyboards import admin_menu, lead_kb, main_menu, notifications_kb, user_remove_kb
 from src.config import settings
 from src.data.database import (
     AiPrediction,
@@ -135,7 +133,7 @@ async def _show_signals(event, flt: str = "all"):
 
 
 @router.message(Command("today"))
-@router.message(lambda m: m.text == "📅 Матчи сегодня")
+@router.message(lambda m: m.text == "📅 Сегодня")
 async def cmd_today(msg: Message):
     # Use MSK date boundaries: MSK midnight = UTC -3h = yesterday 21:00 UTC
     msk = timezone(timedelta(hours=3))
@@ -177,7 +175,7 @@ async def cmd_stats(msg: Message):
 
 
 @router.message(Command("chart"))
-@router.message(lambda m: m.text == "📈 Кривая ROI")
+@router.message(lambda m: m.text == "📈 График ROI")
 async def cmd_chart(msg: Message):
     try:
         import matplotlib
@@ -251,104 +249,6 @@ async def cb_notif_toggle(cb: CallbackQuery):
 
 # ─── New feature handlers ─────────────────────────────────────────────────────
 
-@router.message(lambda m: m.text == "📋 Анализ матча")
-async def cmd_match_analysis(msg: Message):
-    today = datetime.utcnow().date()
-    start = datetime.combine(today, datetime.min.time())
-    end = start + timedelta(days=2)
-    async with SessionLocal() as session:
-        rows = (await session.execute(
-            select(Match).where(
-                Match.utc_date >= start,
-                Match.utc_date < end,
-                Match.status != "FINISHED",
-            ).order_by(Match.utc_date).limit(15)
-        )).scalars().all()
-        if not rows:
-            await msg.answer("Нет предстоящих игр MLB на сегодня/завтра.")
-            return
-        items = []
-        for m in rows:
-            home = await session.get(Team, m.home_team_id)
-            away = await session.get(Team, m.away_team_id)
-            h = (home.short_name or home.name)[:10] if home else "?"
-            a = (away.short_name or away.name)[:10] if away else "?"
-            items.append((m.id, f"⚾ {h} vs {a} | {_msk(m.utc_date)}"))
-    await msg.answer("Выберите матч для анализа:", reply_markup=matches_kb(items))
-
-
-@router.callback_query(lambda c: c.data and c.data.startswith("match_info:"))
-async def cb_match_info(cb: CallbackQuery):
-    mid = int(cb.data.split(":", 1)[1])
-    async with SessionLocal() as session:
-        match = await session.get(Match, mid)
-        if not match:
-            await cb.answer("Матч не найден")
-            return
-        home = await session.get(Team, match.home_team_id)
-        away = await session.get(Team, match.away_team_id)
-        ai_pred = await session.get(AiPrediction, mid)
-        sigs: List[Signal] = list((await session.execute(
-            select(Signal).where(Signal.match_id == mid)
-        )).scalars())
-
-    h_name = home.name if home else "?"
-    a_name = away.name if away else "?"
-    lines = [
-        f"⚾ <b>{h_name} vs {a_name}</b>",
-        f"📅 {_msk(match.utc_date)}\n",
-    ]
-    if match.home_pitcher_name:
-        era = f"{match.home_pitcher_era:.2f}" if match.home_pitcher_era else "н/д"
-        lines.append(f"🏠 {match.home_pitcher_name} ERA {era}")
-    if match.away_pitcher_name:
-        era = f"{match.away_pitcher_era:.2f}" if match.away_pitcher_era else "н/д"
-        lines.append(f"✈️ {match.away_pitcher_name} ERA {era}")
-    if sigs:
-        lines.append(f"\n📊 Сигналы ({len(sigs)}):")
-        for s in sigs:
-            m_l = MARKET_LABELS.get(s.market, s.market)
-            p_l = PICK_LABELS.get(s.pick, s.pick)
-            edge_str = f" edge {s.edge:.1%}" if s.edge else ""
-            lines.append(f"  • {m_l} → <b>{p_l}</b> ({s.confidence:.0%}){edge_str}")
-    if ai_pred:
-        try:
-            reasoning = json.loads(ai_pred.payload).get("reasoning", "")
-            if reasoning:
-                lines.append(f"\n🤖 <i>{reasoning}</i>")
-        except Exception:
-            pass
-    await cb.message.answer("\n".join(lines), parse_mode="HTML")
-    await cb.answer()
-
-
-@router.message(lambda m: m.text == "💰 Расчёт Kelly")
-async def cmd_kelly(msg: Message):
-    async with SessionLocal() as session:
-        since = datetime.utcnow() - timedelta(days=7)
-        sigs: List[Signal] = list((await session.execute(
-            select(Signal).where(
-                Signal.created_at >= since,
-                Signal.book_odds > 1.0,
-                Signal.settled.is_(False),
-            ).order_by(Signal.created_at.desc()).limit(15)
-        )).scalars())
-    if not sigs:
-        await msg.answer(
-            "Нет активных VALUE-сигналов за 7 дней.\n\n"
-            "VALUE появляются когда задан <b>ODDS_API_KEY</b> и найден edge ≥5%.",
-            parse_mode="HTML",
-        )
-        return
-    lines = ["💰 <b>Активные VALUE-сигналы (Kelly)</b>\n"]
-    for s in sigs:
-        m_l = MARKET_LABELS.get(s.market, s.market)
-        p_l = PICK_LABELS.get(s.pick, s.pick)
-        lines.append(
-            f"• {m_l} <b>{p_l}</b> @ {s.book_odds:.2f} "
-            f"| edge {s.edge:.1%} | {s.stake_units:.2f} ед."
-        )
-    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(lambda m: m.text == "🔄 Запустить анализ")
@@ -433,39 +333,6 @@ async def cmd_refresh_odds(msg: Message):
         await msg.answer(f"❌ Ошибка: {e}")
 
 
-@router.message(lambda m: m.text == "📥 Скачать CSV")
-async def cmd_download_csv(msg: Message):
-    async with SessionLocal() as session:
-        since = datetime.utcnow() - timedelta(days=30)
-        sigs: List[Signal] = list((await session.execute(
-            select(Signal).where(Signal.created_at >= since).order_by(Signal.created_at.desc())
-        )).scalars())
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["Дата", "Матч", "Рынок", "Пик", "Вер-сть", "Коэф", "Edge", "Стейк", "Закрыт", "P/L"])
-        for s in sigs:
-            match = await session.get(Match, s.match_id)
-            if match:
-                home = await session.get(Team, match.home_team_id)
-                away = await session.get(Team, match.away_team_id)
-                mn = f"{home.name if home else '?'} vs {away.name if away else '?'}"
-            else:
-                mn = "?"
-            writer.writerow([
-                s.created_at.strftime("%Y-%m-%d %H:%M"), mn,
-                s.market, s.pick,
-                f"{s.model_prob:.3f}",
-                f"{s.book_odds:.2f}" if s.book_odds else "-",
-                f"{s.edge:.3f}" if s.edge else "-",
-                f"{s.stake_units:.2f}",
-                "Да" if s.settled else "Нет",
-                f"{s.profit_units:+.2f}" if s.profit_units is not None else "-",
-            ])
-    content = buf.getvalue().encode("utf-8-sig")
-    await msg.answer_document(
-        BufferedInputFile(content, filename=f"signals_{datetime.utcnow().strftime('%Y%m%d')}.csv"),
-        caption=f"Сигналы за 30 дней: {len(sigs)} записей",
-    )
 
 
 # ─── Admin commands ───────────────────────────────────────────────────────────
