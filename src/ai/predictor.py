@@ -1,6 +1,9 @@
-"""AI ensemble: Claude analyses an MLB game and independently picks the best market + direction."""
+"""AI ансамбль: Claude независимо анализирует игру MLB через веб-поиск
+и выбирает один рынок + направление без зависимости от XGBoost.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -52,63 +55,76 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
         logger.warning(f"ai db cache write failed for {match_id}: {e}")
 
 
-_PROMPT = """Ты — Elite Baseball Big Markets Quant Analyst.
-Специализация: крупные ликвидные рынки MLB — Moneyline (ML), Total Runs (Over/Under {total_line}), Individual Team Total Over (ITB {itb_line}).
-Стиль: исключительно холодный расчёт. Байесовская вероятность, Expected Value, edge. Никаких эмоций.
-Рассуждения СТРОГО на русском языке.
+_PROMPT = """Ты — Elite Baseball Quant Analyst. Твоя задача: проанализировать игру MLB и выбрать ОДНУ лучшую ставку.
 
-## ВХОДНЫЕ ДАННЫЕ
+## ИГРА
+{home} (хозяева) vs {away} (гости)
+Лига: MLB | Лайн тотала: {total_line} ранов | ИТБ линия: {itb_line} ранов
 
-### Справочные вероятности XGBoost-модели:
-P(победа {home}) = {p_home:.0%} | P(победа {away}) = {p_away:.0%}
-P(тотал > {total_line}) = {p_over85:.0%}
-P(хозяева > {itb_line} ранов) = {p_itb_home:.0%} | P(гости > {itb_line} ранов) = {p_itb_away:.0%}
+## СПРАВКА ОТ МОДЕЛИ (второстепенная информация)
+P(победа {home}) ≈ {p_home:.0%} | P(победа {away}) ≈ {p_away:.0%}
+P(тотал > {total_line}) ≈ {p_over85:.0%}
+P(хозяева > {itb_line}) ≈ {p_itb_home:.0%} | P(гости > {itb_line}) ≈ {p_itb_away:.0%}
+Питчеры из БД: {home} — {home_pitcher_name} (ERA {home_era}, WHIP {home_whip}) | {away} — {away_pitcher_name} (ERA {away_era}, WHIP {away_whip})
 
-### Стартовые питчеры:
-{home}: {home_pitcher_name} | ERA {home_era} | WHIP {home_whip} | K/9 {home_k9} | BB/9 {home_bb9}
-{away}: {away_pitcher_name} | ERA {away_era} | WHIP {away_whip} | K/9 {away_k9} | BB/9 {away_bb9}
-ERA diff (хозяева−гости): {era_diff:+.2f} | Статус: {pitcher_known}
+## ДАННЫЕ ИЗ ВЕБ-ПОИСКА
 
-### Форма команд:
-Elo: {home} {home_elo:.0f} vs {away} {away_elo:.0f}
-Win Rate: {home} {home_win_rate:.0%} vs {away} {away_win_rate:.0%}
-Раны: {home} {home_rs_avg:.1f} scored / {home_ra_avg:.1f} allowed
-       {away} {away_rs_avg:.1f} scored / {away_ra_avg:.1f} allowed
+### Стартовые питчеры / составы / травмы:
+{web_pitchers}
 
-### Свежие данные (веб-поиск: питчеры, буллпен, травмы, погода):
-{web_block}
+### Коэффициенты / линии / прогнозы экспертов:
+{web_odds}
 
-## АНАЛИЗ
+### Погода / стадион:
+{web_weather}
 
-1. **Park Factor + Weather:** По web_block определи стадион. Park Factor (нейтральный ≈1.0, Coors Field ≈1.15, Petco Park ≈0.85). Ветер >15 mph к центру поля +0.5–1.0 рана к тоталу, от поля — вычитает. Температура <10°C снижает тотал.
+## ИНСТРУКЦИЯ ПО АНАЛИЗУ
 
-2. **Стартовые питчеры (ключевой фактор):** ERA < 3.50 — элита. ERA > 4.50 — слабый. WHIP < 1.15 — топ контроль. ERA diff > 0.75 в пользу одной команды — сильный сигнал. Проверь свежесть по web_block.
+Проведи полный независимый анализ. Данные из веб-поиска приоритетнее данных модели.
 
-3. **Буллпен + Tail Risk:** Усталость буллпена (3+ игры подряд). Риск коллапса (≥5 ER за ≤3 IP) — если высок, увеличь дисперсию тотала. По web_block проверь травмы ключевых игроков.
+**1. Стартовые питчеры** — главный фактор в MLB.
+Найди актуальные ERA, WHIP, K/9, последние выходы. ERA < 3.50 — элита, > 4.50 — слабый. Если ERA diff > 0.75 — сильный сигнал на победителя и низкий тотал. Проверь количество дней отдыха.
 
-4. **H2H + Home Advantage:** Очные встречи. Домашнее поле: стандарт +3–5% к вероятности.
+**2. Буллпен** — второй по важности фактор.
+Усталость буллпена (3+ игры подряд ключевых питчеров) резко повышает тотал. Посмотри статистику Relief ERA команд.
 
-5. **Выбор рынка:** Оцени все три рынка (ML, TOTAL, ITB). Выбери ОДИН рынок и направление с максимальным edge и наименьшей неопределённостью. Предпочитай рынок, где расхождение с моделью наиболее обосновано реальными данными (питчер, погода, буллпен). Если несколько рынков равнозначны — выбирай TOTAL как наиболее предсказуемый. Пороговый confidence для выбора: ≥ 0.55.
+**3. Коэффициенты и линии** — что говорит рынок?
+Если видишь коэффициенты в веб-данных — используй их. Сравни с вероятностями модели. Большое расхождение = потенциальный edge.
 
-Допустимые значения:
-- market: "ML" | "TOTAL" | "ITB"
-- pick для ML: "HOME" или "AWAY"
-- pick для TOTAL: "OVER" или "UNDER"
-- pick для ITB: "HOME_OVER" или "AWAY_OVER"
-- confidence: 0.50–0.90 (твоя итоговая вероятность этого исхода)
+**4. Park Factor + Weather**
+Стадион: Coors Field ≈ +1.5 рана к тоталу, Petco Park ≈ -1.0, Oracle Park ≈ -0.8.
+Ветер > 15 mph к центру поля: +0.5–1.0 рана. Температура < 10°C: -0.5–1.0 рана.
+Дождь / мокрая погода: снижает пауэр-хиттинг, тотал вниз.
 
-Верни СТРОГО JSON без markdown:
-{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения на русском: главный аргумент (ERA/буллпен/парк/погода), почему именно этот рынок"}}"""
+**5. Форма и H2H**
+Серия результатов последних 7–10 игр. Очные встречи в этом сезоне.
+
+**6. Выбор рынка**
+Оцени три рынка:
+- **ML** (Мани-лайн): кто победит? Лучший выбор при явном преимуществе одного питчера.
+- **TOTAL** (тотал > / < {total_line}): сумма ранов обеих команд. Лучший выбор при ярко выраженных погодных условиях или доминирующих стартовых питчерах.
+- **ITB** (индивидуальный тотал > {itb_line}): одна команда наберёт больше {itb_line} ранов? Лучший выбор при явно слабом питчере противника.
+
+Выбери рынок с МАКСИМАЛЬНЫМ edge и МИНИМАЛЬНОЙ неопределённостью. Если данных не хватает — выбирай TOTAL как наиболее предсказуемый. Не ставь если confidence < 0.55.
+
+Верни СТРОГО JSON без markdown, рассуждения строго на русском:
+{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения: главный аргумент + почему этот рынок"}}
+
+Допустимые значения market: "ML" | "TOTAL" | "ITB"
+pick для ML: "HOME" | "AWAY"
+pick для TOTAL: "OVER" | "UNDER"
+pick для ITB: "HOME_OVER" | "AWAY_OVER"
+confidence: 0.50–0.90"""
 
 
-def _format_web(results: list[dict]) -> str:
+def _format_web(results: list[dict], max_items: int = 4) -> str:
     if not results:
-        return "(нет свежих данных)"
+        return "(данных нет)"
     lines = []
-    for r in results[:5]:
+    for r in results[:max_items]:
         title = r.get("title", "").strip()
         content = r.get("content", "").strip()
-        lines.append(f"• {title}: {content[:250]}")
+        lines.append(f"• {title}: {content[:300]}")
     return "\n".join(lines)
 
 
@@ -153,8 +169,7 @@ def _validate_pick(d: dict) -> bool:
         return False
     if not isinstance(confidence, (int, float)):
         return False
-    if confidence < 0.50 or confidence > 1.0:
-        d["confidence"] = max(0.50, min(1.0, float(confidence)))
+    d["confidence"] = max(0.50, min(1.0, float(confidence)))
     return True
 
 
@@ -167,8 +182,9 @@ async def ai_predict(
     ml_probs: dict,
     features: dict,
 ) -> Optional[dict]:
-    """Returns {market, pick, confidence, reasoning} or None."""
+    """Возвращает {market, pick, confidence, reasoning} или None."""
     from src.config import settings as cfg
+
     now = time.time()
     cached = _cache.get(match_id)
     if cached and now - cached[0] < _CACHE_TTL_SEC:
@@ -180,8 +196,18 @@ async def ai_predict(
         _cache[match_id] = (now, db_cached)
         return db_cached
 
-    web_results = await tavily_search(
-        f"{home} vs {away} pitcher lineup injury bullpen MLB", days=5
+    # Три параллельных веб-поиска: питчеры, коэффициенты, погода
+    web_pitchers_task = tavily_search(
+        f"{home} vs {away} starting pitcher ERA WHIP lineup bullpen injury MLB today", days=3
+    )
+    web_odds_task = tavily_search(
+        f"{home} vs {away} MLB odds betting lines prediction picks", days=2
+    )
+    web_weather_task = tavily_search(
+        f"MLB {home} {away} weather forecast wind temperature stadium", days=2
+    )
+    web_pitchers, web_odds, web_weather = await asyncio.gather(
+        web_pitchers_task, web_odds_task, web_weather_task
     )
 
     def _fmt_stat(v, fmt=".2f", unknown="н/д"):
@@ -189,8 +215,6 @@ async def ai_predict(
 
     home_era = features.get("home_pitcher_era")
     away_era = features.get("away_pitcher_era")
-    era_diff = (home_era - away_era) if (home_era is not None and away_era is not None) else 0.0
-    pitcher_known_str = "✅ оба известны" if features.get("pitcher_known", 0) == 1.0 else "⚠️ частично/неизвестны"
 
     prompt = _PROMPT.format(
         home=home,
@@ -205,40 +229,28 @@ async def ai_predict(
         home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
         home_era=_fmt_stat(home_era),
         home_whip=_fmt_stat(features.get("home_pitcher_whip")),
-        home_k9=_fmt_stat(features.get("home_pitcher_k9")),
-        home_bb9=_fmt_stat(features.get("home_pitcher_bb9")),
         away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
         away_era=_fmt_stat(away_era),
         away_whip=_fmt_stat(features.get("away_pitcher_whip")),
-        away_k9=_fmt_stat(features.get("away_pitcher_k9")),
-        away_bb9=_fmt_stat(features.get("away_pitcher_bb9")),
-        era_diff=era_diff,
-        pitcher_known=pitcher_known_str,
-        home_elo=features.get("home_elo", 1500),
-        away_elo=features.get("away_elo", 1500),
-        home_win_rate=features.get("home_win_rate", 0.5),
-        away_win_rate=features.get("away_win_rate", 0.5),
-        home_rs_avg=features.get("home_rs_avg", 4.3),
-        home_ra_avg=features.get("home_ra_avg", 4.3),
-        away_rs_avg=features.get("away_rs_avg", 4.3),
-        away_ra_avg=features.get("away_ra_avg", 4.3),
-        web_block=_format_web(web_results),
+        web_pitchers=_format_web(web_pitchers),
+        web_odds=_format_web(web_odds),
+        web_weather=_format_web(web_weather),
     )
 
-    raw = await call_llm(prompt, max_tokens=600)
+    raw = await call_llm(prompt, max_tokens=700)
     if not raw:
-        logger.warning(f"ai_predict({match_id}): empty LLM response")
+        logger.warning(f"ai_predict({match_id}): пустой ответ LLM")
         return None
 
     parsed = _parse_json_strict(raw)
     if not parsed or not _validate_pick(parsed):
-        logger.warning(f"ai_predict({match_id}): invalid JSON or pick: {raw[:200]}")
+        logger.warning(f"ai_predict({match_id}): невалидный JSON: {raw[:200]}")
         return None
 
     _cache[match_id] = (now, parsed)
     await _db_cache_put(match_id, parsed)
     logger.info(
-        f"ai_predict({match_id}): {parsed['market']} {parsed['pick']} "
-        f"confidence={parsed['confidence']:.2f}"
+        f"ai_predict({match_id}) {home} vs {away}: "
+        f"{parsed['market']} {parsed['pick']} confidence={parsed['confidence']:.2f}"
     )
     return parsed
