@@ -157,20 +157,24 @@ class MlbApiClient:
         return out
 
     async def fetch_upcoming(self, days_ahead: int = 7) -> List[Dict[str, Any]]:
-        """Fetch scheduled games with probable pitchers, then enrich with their stats."""
+        """Fetch scheduled AND recently finished games for status/score updates."""
         today = datetime.now(timezone.utc).date()
-        start = today.isoformat()
+        # Include 3 days back to catch finished games and update their status+score
+        start = (today - timedelta(days=3)).isoformat()
         end = (today + timedelta(days=days_ahead)).isoformat()
         try:
             games = await self.schedule(
                 start, end,
                 hydrate="team,linescore,probablePitcher",
             )
+            finished = [g for g in games if _is_final(g)]
             upcoming = [g for g in games if not _is_final(g)]
-            logger.info(f"MLB upcoming: {len(upcoming)} games in next {days_ahead} days")
-            # Enrich with pitcher season stats
+            logger.info(
+                f"MLB schedule: {len(upcoming)} upcoming, {len(finished)} finished (last 3 days)"
+            )
+            # Enrich only upcoming games with pitcher season stats
             upcoming = await self.enrich_with_pitcher_stats(upcoming)
-            return upcoming
+            return upcoming + finished
         except Exception as e:
             logger.warning(f"MLB upcoming fetch failed: {e}")
             return []
