@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -63,6 +64,14 @@ async def main() -> None:
     # Init DB tables before bot handles any messages
     await init_db()
     logger.info("DB initialized")
+
+    # Persist AI_ENSEMBLE env var to DB on first start so it survives future restarts
+    # even if the env var is later removed.
+    from src.data.settings_store import get_str, set_bool
+    existing = await get_str("ai_ensemble_enabled", "")
+    if existing == "" and os.environ.get("AI_ENSEMBLE", "").lower() in {"1", "true", "yes", "on"}:
+        await set_bool("ai_ensemble_enabled", True)
+        logger.info("AI_ENSEMBLE env var persisted to DB")
 
     dp = Dispatcher()
     dp.message.middleware(AccessMiddleware())
