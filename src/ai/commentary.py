@@ -27,6 +27,71 @@ async def call_llm(prompt: str, max_tokens: int = 900) -> Optional[str]:
         return None
 
 
+async def call_llm_with_search(prompt: str, max_tokens: int = 1200) -> Optional[str]:
+    """Call Anthropic Claude with built-in web_search_20250305 tool.
+
+    Claude autonomously searches the web — no Tavily needed.
+    Falls back to call_llm() if web search is unavailable.
+    """
+    if not settings.anthropic_api_key:
+        return await call_llm(prompt, max_tokens)
+    try:
+        return await _call_anthropic_with_search(prompt, max_tokens)
+    except Exception as e:
+        logger.warning(f"call_llm_with_search failed ({e}), falling back to call_llm")
+        return await call_llm(prompt, max_tokens)
+
+
+async def _call_anthropic_with_search(prompt: str, max_tokens: int) -> Optional[str]:
+    """Tool-use loop with Anthropic's server-side web_search_20250305 tool."""
+    import anthropic
+
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    messages: list = [{"role": "user", "content": prompt}]
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+    beta_headers = {"anthropic-beta": "web-search-2025-03-05"}
+
+    for _ in range(10):
+        response = await client.messages.create(
+            model=settings.llm_model,
+            max_tokens=max_tokens,
+            tools=tools,
+            messages=messages,
+            extra_headers=beta_headers,
+        )
+
+        text_blocks = [
+            b.text
+            for b in response.content
+            if hasattr(b, "type") and b.type == "text" and hasattr(b, "text")
+        ]
+
+        if response.stop_reason != "tool_use":
+            return "\n".join(text_blocks) or None
+
+        # Append assistant turn and continue loop
+        messages.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for block in response.content:
+            if not (hasattr(block, "type") and block.type == "tool_use"):
+                continue
+            # For server-side web_search the API may embed results in block.content
+            raw = getattr(block, "content", "") or ""
+            content_str = raw if isinstance(raw, str) else str(raw)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": content_str,
+            })
+
+        if not tool_results:
+            return "\n".join(text_blocks) or None
+        messages.append({"role": "user", "content": tool_results})
+
+    return None
+
+
 async def _call_anthropic(prompt: str, max_tokens: int) -> Optional[str]:
     import anthropic
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
