@@ -1,6 +1,7 @@
 """Telegram command handlers for the MLB Baseball bot."""
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -9,7 +10,7 @@ from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from loguru import logger
 from sqlalchemy import select
 
