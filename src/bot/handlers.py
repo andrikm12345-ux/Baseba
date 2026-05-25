@@ -368,8 +368,10 @@ async def cmd_refresh_odds(msg: Message):
         new_count = await generate_and_broadcast(msg.bot)
         if new_count == 0:
             await msg.answer(
-                f"📭 Новых сигналов нет — нет игр в окне ±3 ч от текущего времени."
+                f"📭 Новых сигналов нет.\n"
                 f"{next_signal_hint}\n\n"
+                "Возможные причины: сигналы уже были отправлены ранее, "
+                "нет игр в ближайшие 6 часов или модели ещё обучаются.\n"
                 "Сигналы появятся автоматически за 3 часа до начала игры.",
                 reply_markup=main_menu(),
             )

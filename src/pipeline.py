@@ -152,21 +152,36 @@ async def generate_and_broadcast(bot) -> int:
         return 0
     df = await _load_games_df()
     if df.empty:
+        logger.warning("generate_and_broadcast: no games in DB")
         return 0
+    # Нормализуем utc_date в naive UTC (asyncpg может вернуть timezone-aware)
+    if hasattr(df["utc_date"].dtype, "tz") and df["utc_date"].dtype.tz is not None:
+        df["utc_date"] = df["utc_date"].dt.tz_convert("UTC").dt.tz_localize(None)
+
     finished = df[df["status"] == "FINISHED"].copy()
     now = datetime.utcnow()
-    horizon = now + timedelta(hours=3)
-    # Только pre-game в окне до 3 часов до старта
+    # Окно: игры за 6 ч вперёд + 4 ч назад (чтобы не пропустить если бот был недоступен)
+    horizon = now + timedelta(hours=6)
+    cutoff = now - timedelta(hours=4)
     upcoming = df[
         (df["status"] != "FINISHED")
-        & (df["utc_date"] >= now - timedelta(minutes=15))
+        & (df["utc_date"] >= cutoff)
         & (df["utc_date"] <= horizon)
     ].copy()
+    logger.info(
+        f"generate_and_broadcast: total={len(df)} finished={len(finished)} "
+        f"upcoming_in_window={len(upcoming)} "
+        f"window=[{cutoff.strftime('%H:%M')},{horizon.strftime('%H:%M')} UTC]"
+    )
     if upcoming.empty:
-        logger.info("No upcoming games in the next 24 hours")
+        logger.info("No upcoming games in the signal window")
         return 0
     feats = build_inference_features(upcoming, finished)
     if feats.empty:
+        logger.warning(
+            f"build_inference_features returned empty for {len(upcoming)} upcoming games — "
+            f"team IDs: {upcoming['home_team_id'].tolist()[:5]}"
+        )
         return 0
     preds = predictor.predict(feats)
 
