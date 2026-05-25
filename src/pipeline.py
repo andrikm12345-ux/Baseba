@@ -102,17 +102,14 @@ async def train_models(bot=None) -> None:
 async def _store_signals(
     signals: List[Signal], ai_match_ids: set[int] | None = None
 ) -> List[SignalRow]:
-    """Persist signals, de-duplicating by (match, market, pick)."""
+    """Persist signals. Одна игра = один сигнал — дедупликация по match_id."""
     stored: List[SignalRow] = []
     ai_ids = ai_match_ids or set()
     async with SessionLocal() as session:
         for s in signals:
+            # Одна игра = одна ставка: если сигнал для этого матча уже есть — пропускаем
             exists = (await session.execute(
-                select(SignalRow).where(
-                    SignalRow.match_id == s.match_id,
-                    SignalRow.market == s.market,
-                    SignalRow.pick == s.pick,
-                )
+                select(SignalRow).where(SignalRow.match_id == s.match_id)
             )).scalar_one_or_none()
             if exists is not None:
                 continue
