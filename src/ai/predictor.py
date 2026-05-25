@@ -1,6 +1,12 @@
-"""AI ансамбль: Claude самостоятельно ищет данные в интернете и выбирает ставку."""
+"""AI ансамбль: выбирает ОДНУ ставку на игру MLB.
+
+Два режима:
+- Прямой Anthropic API: Claude ищет данные сам через web_search_20250305
+- NeuroAPI-прокси: Tavily выполняет 3 поиска, результаты передаются в промпт
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -8,7 +14,7 @@ from typing import Dict, Optional
 
 from loguru import logger
 
-from src.ai.commentary import call_llm_with_search
+from src.ai.commentary import call_llm, call_llm_with_search
 
 
 _CACHE_TTL_SEC = 12 * 3600
@@ -51,7 +57,8 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
         logger.warning(f"ai db cache write failed for {match_id}: {e}")
 
 
-_PROMPT = """Ты — Elite Baseball Quant Analyst. Твоя задача: проанализировать игру MLB и выбрать ОДНУ лучшую ставку.
+# --- Промпт для прямого Anthropic API (Claude ищет сам) ---
+_PROMPT_NATIVE = """Ты — Elite Baseball Quant Analyst. Твоя задача: проанализировать игру MLB и выбрать ОДНУ лучшую ставку.
 
 ## ИГРА
 {home} (хозяева) vs {away} (гости) | MLB | Тотал-линия: {total_line} | ИТБ-линия: {itb_line}
@@ -76,36 +83,97 @@ P(ИТБ хоз > {itb_line}) ≈ {p_itb_home:.0%} | P(ИТБ гост > {itb_li
 ERA diff > 0.75 между стартерами — сильный сигнал. ERA < 3.50 элита, > 4.50 слабый.
 Питчер на 4-й день отдыха после 100+ питчей — сниженная эффективность.
 
-**2. Буллпен**
-Усталость (3+ игры подряд) резко повышает тотал. Если команда вела в 8-м иннинге последние 3 игры — буллпен на износе.
+**2. Буллпен** — усталость (3+ игры подряд) резко повышает тотал.
 
 **3. Park Factor**
-Coors Field (Колорадо) ≈ +1.5 рана к тоталу.
-Petco Park (Сан-Диего) ≈ -1.0, Oracle Park (Сан-Франциско) ≈ -0.8.
+Coors Field (Колорадо) ≈ +1.5 рана. Petco Park (Сан-Диего) ≈ -1.0. Oracle Park (Сан-Франциско) ≈ -0.8.
 
 **4. Погода**
-Ветер > 15 mph от питчера к хиттеру (to center): +0.5–1.0 рана к тоталу.
-Ветер к питчеру (from center): -0.5–1.0 рана. Дождь / холод < 10°C: тотал вниз.
+Ветер > 15 mph к центру поля: +0.5–1.0 рана к тоталу. Дождь / холод < 10°C: тотал вниз.
 
-**5. Форма**
-Win rate последних 10 игр. H2H встречи в этом сезоне.
+**5. Форма**  Win rate последних 10 игр. H2H встречи в этом сезоне.
 
 **6. Выбор рынка**
 - **ML**: кто победит? Лучший при явном преимуществе одного питчера (ERA diff > 0.75).
-- **TOTAL** (> / < {total_line} ранов): лучший при доминирующих стартерах ИЛИ выраженной погоде.
+- **TOTAL** (> / < {total_line}): лучший при доминирующих стартерах ИЛИ выраженной погоде.
 - **ITB** (> {itb_line} ранов одной командой): лучший при явно слабом питчере соперника.
 
-Выбери рынок с МАКСИМАЛЬНЫМ edge. Если неопределённость высока — выбирай TOTAL.
-НЕ ставь если confidence < 0.55.
+Выбери рынок с максимальным edge. Если неопределённость высока — TOTAL. НЕ ставь если confidence < 0.55.
 
 Верни СТРОГО JSON без markdown, рассуждения строго на русском:
-{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения: главный аргумент"}}
+{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения"}}
 
 market: "ML" | "TOTAL" | "ITB"
 pick для ML: "HOME" | "AWAY"
 pick для TOTAL: "OVER" | "UNDER"
 pick для ITB: "HOME_OVER" | "AWAY_OVER"
 confidence: 0.50–0.90"""
+
+
+# --- Промпт для NeuroAPI-прокси (Tavily передаёт данные заранее) ---
+_PROMPT_PROXY = """Ты — Elite Baseball Quant Analyst. Твоя задача: проанализировать игру MLB и выбрать ОДНУ лучшую ставку.
+
+## ИГРА
+{home} (хозяева) vs {away} (гости) | MLB | Тотал-линия: {total_line} | ИТБ-линия: {itb_line}
+
+## СПРАВКА ОТ ML-МОДЕЛИ (вспомогательно, не главное)
+P(победа {home}) ≈ {p_home:.0%} | P(победа {away}) ≈ {p_away:.0%}
+P(тотал > {total_line}) ≈ {p_over85:.0%}
+P(ИТБ хоз > {itb_line}) ≈ {p_itb_home:.0%} | P(ИТБ гост > {itb_line}) ≈ {p_itb_away:.0%}
+Из БД: {home} — {home_pitcher_name} (ERA {home_era}, WHIP {home_whip}) | {away} — {away_pitcher_name} (ERA {away_era}, WHIP {away_whip})
+
+## ДАННЫЕ ИЗ ВЕБ-ПОИСКА
+
+### Стартовые питчеры / составы / травмы:
+{web_pitchers}
+
+### Коэффициенты / линии / прогнозы:
+{web_odds}
+
+### Погода / стадион:
+{web_weather}
+
+## КАК АНАЛИЗИРОВАТЬ
+
+**1. Питчеры** — главный фактор MLB.
+ERA diff > 0.75 между стартерами — сильный сигнал. ERA < 3.50 элита, > 4.50 слабый.
+
+**2. Буллпен** — усталость (3+ игры подряд) резко повышает тотал.
+
+**3. Park Factor**
+Coors Field (Колорадо) ≈ +1.5 рана. Petco Park (Сан-Диего) ≈ -1.0. Oracle Park (Сан-Франциско) ≈ -0.8.
+
+**4. Погода**
+Ветер > 15 mph к центру поля: +0.5–1.0 рана к тоталу. Дождь / холод < 10°C: тотал вниз.
+
+**5. Форма** — Win rate последних 10 игр. H2H встречи в этом сезоне.
+
+**6. Выбор рынка**
+- **ML**: кто победит? Лучший при явном преимуществе одного питчера.
+- **TOTAL** (> / < {total_line}): лучший при доминирующих стартерах ИЛИ выраженной погоде.
+- **ITB** (> {itb_line}): лучший при явно слабом питчере соперника.
+
+Выбери рынок с максимальным edge. Если неопределённость высока — TOTAL. НЕ ставь если confidence < 0.55.
+
+Верни СТРОГО JSON без markdown, рассуждения строго на русском:
+{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения"}}
+
+market: "ML" | "TOTAL" | "ITB"
+pick для ML: "HOME" | "AWAY"
+pick для TOTAL: "OVER" | "UNDER"
+pick для ITB: "HOME_OVER" | "AWAY_OVER"
+confidence: 0.50–0.90"""
+
+
+def _format_web(results: list[dict], max_items: int = 4) -> str:
+    if not results:
+        return "(данных нет)"
+    lines = []
+    for r in results[:max_items]:
+        title = r.get("title", "").strip()
+        content = r.get("content", "").strip()
+        lines.append(f"• {title}: {content[:300]}")
+    return "\n".join(lines)
 
 
 def _parse_json_strict(raw: str) -> Optional[dict]:
@@ -153,6 +221,39 @@ def _validate_pick(d: dict) -> bool:
     return True
 
 
+async def _build_proxy_prompt(home: str, away: str, cfg, ml_probs: dict, features: dict) -> str:
+    """Запускает Tavily поиски параллельно и подставляет результаты в промпт."""
+    from src.data.web_search import tavily_search
+
+    web_pitchers, web_odds, web_weather = await asyncio.gather(
+        tavily_search(f"{home} vs {away} starting pitcher ERA WHIP lineup bullpen injury MLB today", days=3),
+        tavily_search(f"{home} vs {away} MLB odds betting lines prediction picks", days=2),
+        tavily_search(f"MLB {home} {away} weather forecast wind temperature stadium", days=2),
+    )
+
+    def _fmt(v, fmt=".2f"):
+        return format(v, fmt) if v is not None else "н/д"
+
+    return _PROMPT_PROXY.format(
+        home=home, away=away,
+        total_line=cfg.total_line, itb_line=cfg.itb_line,
+        p_home=ml_probs.get("p_home", 0.54),
+        p_away=ml_probs.get("p_away", 0.46),
+        p_over85=ml_probs.get("p_over85", 0.5),
+        p_itb_home=ml_probs.get("p_itb_home", 0.5),
+        p_itb_away=ml_probs.get("p_itb_away", 0.5),
+        home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
+        home_era=_fmt(features.get("home_pitcher_era")),
+        home_whip=_fmt(features.get("home_pitcher_whip")),
+        away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
+        away_era=_fmt(features.get("away_pitcher_era")),
+        away_whip=_fmt(features.get("away_pitcher_whip")),
+        web_pitchers=_format_web(web_pitchers),
+        web_odds=_format_web(web_odds),
+        web_weather=_format_web(web_weather),
+    )
+
+
 async def ai_predict(
     *,
     match_id: int,
@@ -179,38 +280,44 @@ async def ai_predict(
     def _fmt(v, fmt=".2f"):
         return format(v, fmt) if v is not None else "н/д"
 
-    prompt = _PROMPT.format(
-        home=home,
-        away=away,
-        total_line=cfg.total_line,
-        itb_line=cfg.itb_line,
-        p_home=ml_probs.get("p_home", 0.54),
-        p_away=ml_probs.get("p_away", 0.46),
-        p_over85=ml_probs.get("p_over85", 0.5),
-        p_itb_home=ml_probs.get("p_itb_home", 0.5),
-        p_itb_away=ml_probs.get("p_itb_away", 0.5),
-        home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
-        home_era=_fmt(features.get("home_pitcher_era")),
-        home_whip=_fmt(features.get("home_pitcher_whip")),
-        away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
-        away_era=_fmt(features.get("away_pitcher_era")),
-        away_whip=_fmt(features.get("away_pitcher_whip")),
-    )
+    if cfg.llm_base_url:
+        # NeuroAPI-прокси: Tavily выполняет поиски, результаты в промпте
+        prompt = await _build_proxy_prompt(home, away, cfg, ml_probs, features)
+        raw = await call_llm(prompt, max_tokens=900)
+        mode = "proxy+tavily"
+    else:
+        # Прямой Anthropic API: Claude ищет сам через web_search_20250305
+        prompt = _PROMPT_NATIVE.format(
+            home=home, away=away,
+            total_line=cfg.total_line, itb_line=cfg.itb_line,
+            p_home=ml_probs.get("p_home", 0.54),
+            p_away=ml_probs.get("p_away", 0.46),
+            p_over85=ml_probs.get("p_over85", 0.5),
+            p_itb_home=ml_probs.get("p_itb_home", 0.5),
+            p_itb_away=ml_probs.get("p_itb_away", 0.5),
+            home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
+            home_era=_fmt(features.get("home_pitcher_era")),
+            home_whip=_fmt(features.get("home_pitcher_whip")),
+            away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
+            away_era=_fmt(features.get("away_pitcher_era")),
+            away_whip=_fmt(features.get("away_pitcher_whip")),
+        )
+        raw = await call_llm_with_search(prompt, max_tokens=1200)
+        mode = "anthropic+websearch"
 
-    raw = await call_llm_with_search(prompt, max_tokens=1200)
     if not raw:
-        logger.warning(f"ai_predict({match_id}): пустой ответ")
+        logger.warning(f"ai_predict({match_id}): пустой ответ [{mode}]")
         return None
 
     parsed = _parse_json_strict(raw)
     if not parsed or not _validate_pick(parsed):
-        logger.warning(f"ai_predict({match_id}): невалидный JSON: {raw[:200]}")
+        logger.warning(f"ai_predict({match_id}): невалидный JSON [{mode}]: {raw[:200]}")
         return None
 
     _cache[match_id] = (now, parsed)
     await _db_cache_put(match_id, parsed)
     logger.info(
-        f"ai_predict({match_id}) {home} vs {away}: "
+        f"ai_predict({match_id}) {home} vs {away} [{mode}]: "
         f"{parsed['market']} {parsed['pick']} confidence={parsed['confidence']:.2f}"
     )
     return parsed
