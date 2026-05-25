@@ -134,7 +134,21 @@ async def generate_and_broadcast(bot) -> int:
     """Generate signals for upcoming games and broadcast new ones."""
     predictor = Predictor()
     if not predictor.ready:
-        logger.warning("Models not ready — skip signal generation")
+        # Проверяем: может быть нужно просто переобучить (данные есть, модели слетели)
+        async with SessionLocal() as session:
+            from sqlalchemy import func
+            n_finished = (await session.execute(
+                select(func.count()).select_from(Match).where(Match.status == "FINISHED")
+            )).scalar() or 0
+        if n_finished >= 200:
+            logger.warning(
+                f"Models not ready but {n_finished} finished games available — "
+                "triggering background retrain"
+            )
+            import asyncio as _aio
+            _aio.create_task(train_models(bot=bot))
+        else:
+            logger.warning(f"Models not ready, only {n_finished} finished games — need bootstrap")
         return 0
     df = await _load_games_df()
     if df.empty:

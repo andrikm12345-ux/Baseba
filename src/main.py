@@ -28,19 +28,40 @@ from src.signals.tracker import settle_pending
 
 async def _warmup(bot: Bot) -> None:
     try:
-        # Try to restore model files from database (persisted from previous run)
-        if not Predictor().ready:
-            logger.info("Models not on disk — trying to restore from database...")
-            restored = await restore_models_from_db()
-            if restored:
-                logger.info("Models restored from DB successfully")
-            else:
-                logger.info("No models in DB — cold start: bootstrapping MLB history...")
-                await bootstrap_history()
-                await train_models(bot=bot)
-        else:
+        predictor = Predictor()
+        if predictor.ready:
             logger.info("Models found on disk — running incremental refresh")
             await refresh_upcoming(days=7)
+            await settle_pending()
+            await generate_and_broadcast(bot)
+            return
+
+        # Попытка восстановить модели из БД
+        logger.info("Models not on disk — trying to restore from database...")
+        restored = await restore_models_from_db()
+        if restored and Predictor().ready:
+            logger.info("Models restored from DB successfully")
+            await refresh_upcoming(days=7)
+            await settle_pending()
+            await generate_and_broadcast(bot)
+            return
+
+        # Модели в БД есть, но feature mismatch → нужно переобучение
+        if restored:
+            logger.warning("Models from DB have feature mismatch — retraining on existing data")
+        else:
+            # Холодный старт: нет ни моделей, ни данных
+            logger.info("No models in DB — cold start: bootstrapping MLB history...")
+            await bootstrap_history()
+
+        await refresh_upcoming(days=7)
+        await train_models(bot=bot)
+
+        # Сразу генерируем сигналы после обучения, не ждём расписание
+        if Predictor().ready:
+            await generate_and_broadcast(bot)
+        else:
+            logger.warning("Warmup: models still not ready after training — check training logs")
     except Exception as e:
         logger.error(f"Warmup failed (bot will still work): {e}")
 
