@@ -6,11 +6,22 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="⚾ Сигналы"),            KeyboardButton(text="📅 Сегодня")],
             [KeyboardButton(text="📊 Статистика"),          KeyboardButton(text="📈 График ROI")],
-            [KeyboardButton(text="🔄 Запустить анализ"),    KeyboardButton(text="🔔 Уведомления")],
-            [KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="📜 История ставок"),      KeyboardButton(text="🔄 Запустить анализ")],
+            [KeyboardButton(text="🔔 Уведомления"),         KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
     )
+
+
+def history_nav_kb(page: int, has_next: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton(text="⬅️ Новее", callback_data=f"history:{page - 1}"))
+    if has_next:
+        buttons.append(InlineKeyboardButton(text="Старее ➡️", callback_data=f"history:{page + 1}"))
+    if not buttons:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
 def signals_filter_kb() -> InlineKeyboardMarkup:

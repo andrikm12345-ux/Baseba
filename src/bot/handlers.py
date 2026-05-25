@@ -18,12 +18,14 @@ from src.bot.formatters import (
     MARKET_LABELS,
     PICK_LABELS,
     WELCOME_TEXT,
+    _MONTHS_RU,
+    format_history,
     format_roi_stats,
     format_signal,
     format_signal_short,
     format_training_report,
 )
-from src.bot.keyboards import admin_menu, lead_kb, main_menu, notifications_kb, user_remove_kb
+from src.bot.keyboards import admin_menu, history_nav_kb, lead_kb, main_menu, notifications_kb, user_remove_kb
 from src.config import settings
 from src.data.database import (
     AiPrediction,
@@ -368,6 +370,87 @@ async def cmd_refresh_odds(msg: Message):
         await msg.answer(f"❌ Ошибка: {e}")
 
 
+
+
+# ─── History ─────────────────────────────────────────────────────────────────
+
+@router.message(Command("history"))
+@router.message(lambda m: m.text == "📜 История ставок")
+async def cmd_history(msg: Message):
+    await _show_history(msg, page=0)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("history:"))
+async def cb_history(cb: CallbackQuery):
+    page = int(cb.data.split(":")[1])
+    await _show_history(cb, page=page)
+
+
+async def _show_history(event, page: int = 0):
+    is_cb = isinstance(event, CallbackQuery)
+    send = event.message.answer if is_cb else event.answer
+
+    msk = timezone(timedelta(hours=3))
+    now_utc = datetime.utcnow()
+    end_utc = now_utc - timedelta(days=page * 7)
+    start_utc = end_utc - timedelta(days=7)
+
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(Signal)
+            .join(Match, Match.id == Signal.match_id)
+            .where(Match.utc_date >= start_utc, Match.utc_date < end_utc)
+            .order_by(Match.utc_date.desc())
+        )).scalars())
+
+        # Группировка по MSK-дате
+        day_map: dict = {}
+        for s in rows:
+            match = await session.get(Match, s.match_id)
+            if not match:
+                continue
+            home_team = await session.get(Team, match.home_team_id)
+            away_team = await session.get(Team, match.away_team_id)
+
+            msk_date = match.utc_date.replace(tzinfo=timezone.utc).astimezone(msk).date()
+            day_key = msk_date.isoformat()
+            day_label = f"{msk_date.day} {_MONTHS_RU[msk_date.month]}"
+
+            h_abbr = (home_team.short_name or home_team.name[:10]) if home_team else "?"
+            a_abbr = (away_team.short_name or away_team.name[:10]) if away_team else "?"
+
+            item = {
+                "home_abbr": h_abbr,
+                "away_abbr": a_abbr,
+                "home_runs": match.home_runs,
+                "away_runs": match.away_runs,
+                "market": s.market,
+                "pick": s.pick,
+                "book_odds": s.book_odds,
+                "profit": s.profit_units,
+                "settled": s.settled,
+                "won": s.won,
+            }
+            if day_key not in day_map:
+                day_map[day_key] = (day_label, [])
+            day_map[day_key][1].append(item)
+
+    day_groups = [v for _, v in sorted(day_map.items(), reverse=True)]
+
+    # Есть ли более старая страница (проверяем есть ли что-то ещё раньше)
+    has_next = page < 3  # максимум 4 недели
+
+    text = format_history(day_groups)
+    kb = history_nav_kb(page, has_next)
+
+    if is_cb:
+        try:
+            await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await send(text, parse_mode="HTML", reply_markup=kb)
+        await event.answer()
+    else:
+        await send(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ─── Admin commands ───────────────────────────────────────────────────────────

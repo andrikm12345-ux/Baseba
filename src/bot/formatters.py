@@ -217,6 +217,65 @@ def format_roi_stats(model_stats, value_stats, ai_stats) -> str:
     return "\n".join(lines)
 
 
+_MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+
+
+def format_history(day_groups: list) -> str:
+    """day_groups: список (day_label, [item_dict])
+    item_dict: {home_abbr, away_abbr, home_runs, away_runs, market, pick,
+                book_odds, profit, settled, won}
+    """
+    if not day_groups:
+        return "📜 <b>История ставок пуста.</b>\n\nСигналы появятся после первых завершённых игр."
+
+    lines = ["📜 <b>История ставок</b>\n"]
+    for day_label, items in day_groups:
+        settled = [x for x in items if x["settled"]]
+        won_cnt = sum(1 for x in settled if x["won"])
+        lost_cnt = sum(1 for x in settled if not x["won"])
+        pending_cnt = sum(1 for x in items if not x["settled"])
+        day_profit = sum(x.get("profit", 0.0) or 0.0 for x in settled)
+
+        profit_str = f"{'+' if day_profit >= 0 else ''}{day_profit:.2f} ед."
+        stats_parts = []
+        if won_cnt or lost_cnt:
+            stats_parts.append(f"✅ {won_cnt}  ❌ {lost_cnt}")
+        if pending_cnt:
+            stats_parts.append(f"⏳ {pending_cnt}")
+        if settled:
+            stats_parts.append(profit_str)
+        stats = "  |  ".join(stats_parts)
+
+        lines.append(f"\n<b>📅 {day_label}</b>  {stats}")
+
+        for it in items:
+            icon = "⏳" if not it["settled"] else ("✅" if it["won"] else "❌")
+            h, a = it["home_abbr"], it["away_abbr"]
+            hr, ar = it.get("home_runs"), it.get("away_runs")
+            score = f"{h} {hr}:{ar} {a}" if (hr is not None and ar is not None) else f"{h} vs {a}"
+
+            m_short = {"ML": "ML", "TOTAL": "Тотал", "ITB": "ИТБ"}.get(it["market"], it["market"])
+            p_short = PICK_LABELS.get(it["pick"], it["pick"])
+            odds = it.get("book_odds") or 0.0
+
+            if it["settled"]:
+                p = it.get("profit") or 0.0
+                p_str = f"{'+' if p >= 0 else ''}{p:.2f} ед."
+                if odds > 1.0:
+                    row = f"{icon} {score} | {m_short} {p_short} @ {odds:.2f} → {p_str}"
+                else:
+                    row = f"{icon} {score} | {m_short} {p_short} → {p_str}"
+            else:
+                row = f"{icon} {score} | {m_short} {p_short}" + (f" @ {odds:.2f}" if odds > 1.0 else "")
+            lines.append(row)
+
+    return "\n".join(lines)
+
+
 WELCOME_TEXT = """⚾ <b>Baseball Signals — MLB</b>
 
 Пока другие продают «инсайды» — мы считаем.
