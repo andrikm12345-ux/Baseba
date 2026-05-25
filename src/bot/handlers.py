@@ -88,24 +88,34 @@ async def _show_signals(event, flt: str = "all"):
     is_cb = isinstance(event, CallbackQuery)
     send = event.message.answer if is_cb else event.answer
 
-    horizon = datetime.utcnow() - timedelta(days=7)
+    # Только активные (не закрытые) сигналы для игр которые ещё впереди
+    cutoff = datetime.utcnow() - timedelta(hours=4)  # игра закончилась не более 4ч назад
     async with SessionLocal() as session:
-        q = select(Signal).join(Match).where(
-            Signal.created_at >= horizon,
-        ).order_by(Signal.created_at.desc()).limit(20)
+        q = (
+            select(Signal)
+            .join(Match, Match.id == Signal.match_id)
+            .where(
+                Signal.settled.is_(False),
+                Match.utc_date >= cutoff,
+            )
+            .order_by(Match.utc_date.asc())
+            .limit(20)
+        )
         if flt == "ML":
             q = q.where(Signal.market == "ML")
         elif flt == "TOTAL":
             q = q.where(Signal.market == "TOTAL")
-        elif flt == "RL":
-            q = q.where(Signal.market == "RL")
+        elif flt == "ITB":
+            q = q.where(Signal.market == "ITB")
         elif flt == "value":
             q = q.where(Signal.book_odds > 1.0)
         signals: List[Signal] = list((await session.execute(q)).scalars())
         if not signals:
             await send(
-                "Сигналов за последние 7 дней нет.\n\n"
-                "Нажмите <b>🔄 Запустить анализ</b> — бот проверит ближайшие игры.",
+                "📭 <b>Активных сигналов нет.</b>\n\n"
+                "Сигналы появляются за 3 часа до начала игры.\n"
+                "Нажмите <b>🔄 Запустить анализ</b> для проверки ближайших игр.\n"
+                "Прошедшие ставки — в разделе <b>📜 История ставок</b>.",
                 parse_mode="HTML",
             )
             if is_cb:
@@ -124,11 +134,11 @@ async def _show_signals(event, flt: str = "all"):
                 ai_comment = s.commentary
             texts.append(format_signal(s, match, home, away, ai_comment))
     if not texts:
-        await send("Нет сигналов.")
+        await send("Нет активных сигналов.")
         if is_cb:
             await event.answer()
         return
-    for text in texts[:5]:
+    for text in texts[:8]:
         await send(text, parse_mode="HTML")
     if is_cb:
         await event.answer()
