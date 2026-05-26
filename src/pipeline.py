@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 
 import pandas as pd
@@ -207,11 +207,23 @@ async def generate_and_broadcast(bot) -> int:
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
     ai_on = await get_bool("ai_ensemble_enabled", False)
+    broadcast_horizon = datetime.utcnow() + timedelta(hours=5)
     if new_rows and bot:
         async with SessionLocal() as session:
             for row in new_rows:
                 match = await session.get(Match, row.match_id)
                 if not match:
+                    continue
+                # Рассылаем только если игра начинается в ближайшие 5 часов
+                game_time = match.utc_date
+                if hasattr(game_time, "tzinfo") and game_time.tzinfo is not None:
+                    game_time = game_time.replace(tzinfo=None)
+                if game_time > broadcast_horizon:
+                    logger.debug(
+                        f"signal match_id={row.match_id} skipped — game in "
+                        f"{(game_time - datetime.utcnow()).seconds // 3600}h "
+                        f"(>{5}h window)"
+                    )
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
