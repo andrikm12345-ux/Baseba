@@ -358,7 +358,7 @@ async def fetch_odds_for_matches(
 
         if h_ml > 0 and a_ml > 0:
             vig = 1 / h_ml + 1 / a_ml
-            if not (1.02 <= vig <= 1.20):
+            if not (0.98 <= vig <= 1.25):
                 logger.warning(
                     f"odds sanity FAIL match_id={match_id} [{home} vs {away}]: "
                     f"ml_home={h_ml:.2f} ml_away={a_ml:.2f} vig={vig:.3f} — discarding"
