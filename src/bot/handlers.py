@@ -509,48 +509,62 @@ async def cmd_train(msg: Message):
 
 @router.message(Command("purge_signals"))
 async def cmd_purge_signals(msg: Message):
-    """Delete signals without real odds (book_odds=0) created today or on a given date.
+    """Delete no-odds signals (book_odds=0) for unsettled future games.
 
     Usage:
-      /purge_signals          — today UTC
-      /purge_signals 2026-05-26
+      /purge_signals          — all future unsettled no-odds signals
+      /purge_signals 2026-05-26  — only that date
     """
     if not is_admin(msg.from_user.id):
         return
     args = msg.text.split(maxsplit=1)
-    if len(args) > 1:
-        try:
-            target_date = datetime.strptime(args[1].strip(), "%Y-%m-%d").date()
-        except ValueError:
-            await msg.answer("❌ Неверный формат даты. Используй: /purge_signals 2026-05-26")
-            return
-    else:
-        target_date = datetime.utcnow().date()
-
-    day_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0)
-    day_end = day_start + timedelta(days=1)
 
     async with SessionLocal() as session:
-        # Count first
-        count_q = select(Signal).where(
-            Signal.created_at >= day_start,
-            Signal.created_at < day_end,
-            Signal.book_odds == 0.0,
-        )
-        rows = (await session.execute(count_q)).scalars().all()
+        if len(args) > 1:
+            try:
+                target_date = datetime.strptime(args[1].strip(), "%Y-%m-%d").date()
+            except ValueError:
+                await msg.answer("❌ Неверный формат даты. Используй: /purge_signals 2026-05-26")
+                return
+            day_start = datetime(target_date.year, target_date.month, target_date.day)
+            day_end = day_start + timedelta(days=1)
+            q = (
+                select(Signal)
+                .join(Match, Match.id == Signal.match_id)
+                .where(
+                    Signal.book_odds == 0.0,
+                    Signal.settled.is_(False),
+                    Match.utc_date >= day_start,
+                    Match.utc_date < day_end,
+                )
+            )
+            scope = str(target_date)
+        else:
+            # Все незакрытые сигналы без кэфов для будущих игр
+            q = (
+                select(Signal)
+                .join(Match, Match.id == Signal.match_id)
+                .where(
+                    Signal.book_odds == 0.0,
+                    Signal.settled.is_(False),
+                    Match.utc_date > datetime.utcnow(),
+                )
+            )
+            scope = "все будущие"
+
+        rows = (await session.execute(q)).scalars().all()
         if not rows:
-            await msg.answer(f"✅ Нет сигналов без коэффициентов за {target_date}")
+            await msg.answer(f"✅ Нет сигналов без коэффициентов ({scope})")
             return
 
         ids = [r.id for r in rows]
-        await session.execute(
-            delete(Signal).where(Signal.id.in_(ids))
-        )
+        await session.execute(delete(Signal).where(Signal.id.in_(ids)))
         await session.commit()
 
-    logger.info(f"purge_signals: deleted {len(ids)} no-odds signals for {target_date} by admin {msg.from_user.id}")
+    logger.info(f"purge_signals: deleted {len(ids)} no-odds signals ({scope}) by admin {msg.from_user.id}")
     await msg.answer(
-        f"🗑 Удалено <b>{len(ids)}</b> сигналов без коэффициентов за {target_date}",
+        f"🗑 Удалено <b>{len(ids)}</b> сигналов без коэффициентов ({scope}).\n"
+        f"Эти матчи получат нормальные сигналы с кэфами когда войдут в 5-часовое окно.",
         parse_mode="HTML",
     )
 
