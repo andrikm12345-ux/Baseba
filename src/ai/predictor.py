@@ -116,7 +116,12 @@ _PROMPT_PROXY = """Ты — Elite Baseball Quant Analyst. Твоя задача:
 ## ИГРА
 {home} (хозяева) vs {away} (гости) | MLB | Тотал-линия: {total_line} | ИТБ-линия: {itb_line}
 
-## СПРАВКА ОТ ML-МОДЕЛИ (вспомогательно, не главное)
+## РЕАЛЬНЫЕ КОЭФФИЦИЕНТЫ (Pinnacle / FanDuel / DraftKings, актуальные)
+Мани-лайн: {home} {ml_home} | {away} {ml_away}
+Тотал {total_line}: Б {odds_over} | М {odds_under}
+Ран-лайн (-1.5): {home} {rl_home} | {away} {rl_away}
+
+## СПРАВКА ОТ ML-МОДЕЛИ (вспомогательно)
 P(победа {home}) ≈ {p_home:.0%} | P(победа {away}) ≈ {p_away:.0%}
 P(тотал > {total_line}) ≈ {p_over85:.0%}
 P(ИТБ хоз > {itb_line}) ≈ {p_itb_home:.0%} | P(ИТБ гост > {itb_line}) ≈ {p_itb_away:.0%}
@@ -126,9 +131,6 @@ P(ИТБ хоз > {itb_line}) ≈ {p_itb_home:.0%} | P(ИТБ гост > {itb_li
 
 ### Стартовые питчеры / составы / травмы:
 {web_pitchers}
-
-### Коэффициенты / линии / прогнозы:
-{web_odds}
 
 ### Погода / стадион:
 {web_weather}
@@ -222,17 +224,21 @@ def _validate_pick(d: dict) -> bool:
 
 
 async def _build_proxy_prompt(home: str, away: str, cfg, ml_probs: dict, features: dict) -> str:
-    """Запускает Tavily поиски параллельно и подставляет результаты в промпт."""
+    """Запускает 2 Tavily-поиска параллельно (питчеры + погода).
+    Коэффициенты берём из Odds API (features), не из веба — исключает конфликт данных."""
     from src.data.web_search import tavily_search
 
-    web_pitchers, web_odds, web_weather = await asyncio.gather(
+    web_pitchers, web_weather = await asyncio.gather(
         tavily_search(f"{home} vs {away} starting pitcher ERA WHIP lineup bullpen injury MLB today", days=3),
-        tavily_search(f"{home} vs {away} MLB odds betting lines prediction picks", days=2),
         tavily_search(f"MLB {home} {away} weather forecast wind temperature stadium", days=2),
     )
 
     def _fmt(v, fmt=".2f"):
-        return format(v, fmt) if v is not None else "н/д"
+        try:
+            f = float(v)
+            return format(f, fmt) if f > 0 else "н/д"
+        except (TypeError, ValueError):
+            return "н/д"
 
     return _PROMPT_PROXY.format(
         home=home, away=away,
@@ -248,8 +254,13 @@ async def _build_proxy_prompt(home: str, away: str, cfg, ml_probs: dict, feature
         away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
         away_era=_fmt(features.get("away_pitcher_era")),
         away_whip=_fmt(features.get("away_pitcher_whip")),
+        ml_home=_fmt(features.get("odds_ml_home")),
+        ml_away=_fmt(features.get("odds_ml_away")),
+        odds_over=_fmt(features.get("odds_over85")),
+        odds_under=_fmt(features.get("odds_under85")),
+        rl_home=_fmt(features.get("odds_rl_home")),
+        rl_away=_fmt(features.get("odds_rl_away")),
         web_pitchers=_format_web(web_pitchers),
-        web_odds=_format_web(web_odds),
         web_weather=_format_web(web_weather),
     )
 

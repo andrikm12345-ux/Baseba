@@ -361,6 +361,11 @@ async def _apply_ai_ensemble(
             feat_dict = feats_by_id.get(mid, {})
             feat_dict["home_pitcher_name"] = match_obj.home_pitcher_name
             feat_dict["away_pitcher_name"] = match_obj.away_pitcher_name
+            # Передаём реальные кэфы из Odds API в AI-промпт (не из Tavily-поиска)
+            for odds_col in ("odds_ml_home", "odds_ml_away", "odds_over85",
+                             "odds_under85", "odds_rl_home", "odds_rl_away"):
+                if odds_col in row and pd.notna(row[odds_col]):
+                    feat_dict[odds_col] = float(row[odds_col])
             ai = await ai_predict(
                 match_id=mid,
                 home=home, away=away, competition=comp,
