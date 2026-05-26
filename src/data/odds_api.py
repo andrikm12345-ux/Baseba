@@ -138,13 +138,34 @@ class OddsApiClient:
     async def fetch_mlb_odds(self) -> List[Dict[str, Any]]:
         """Fetch all upcoming MLB games with ML/totals/spreads odds.
 
-        One call covers all games — cache it for 2 hours to stay within 500/month.
+        Two-layer cache: memory (fast) + DB (survives container restarts).
+        2-hour TTL → ~12 calls/day → ~360/month, within 500 free tier.
         """
+        import json as _json
         global _cache
+        now_mono = time.monotonic()
+        now_wall = time.time()
+
+        # 1. Memory cache
         ts, data = _cache
-        if time.monotonic() - ts < CACHE_TTL and data:
-            logger.debug(f"odds cache hit ({len(data)} events)")
+        if now_mono - ts < CACHE_TTL and data:
+            logger.debug(f"odds memory-cache hit ({len(data)} events)")
             return data
+
+        # 2. DB cache (survives restarts)
+        try:
+            from src.data.settings_store import get_str
+            db_raw = await get_str("odds_cache_payload", "")
+            db_ts_str = await get_str("odds_cache_ts", "0")
+            db_ts = float(db_ts_str)
+            if db_raw and (now_wall - db_ts) < CACHE_TTL:
+                db_data = _json.loads(db_raw)
+                if db_data:
+                    _cache = (now_mono, db_data)
+                    logger.debug(f"odds db-cache hit ({len(db_data)} events, age={(now_wall-db_ts)/60:.0f}m)")
+                    return db_data
+        except Exception as e:
+            logger.debug(f"odds db-cache read failed: {e}")
 
         params = {
             "apiKey": self.api_key,
@@ -178,6 +199,14 @@ class OddsApiClient:
                     return []
                 logger.info(f"the-odds-api: fetched {len(events)} MLB events")
                 _cache = (time.monotonic(), events)
+                # Persist to DB so cache survives container restarts
+                try:
+                    import json as _json
+                    from src.data.settings_store import set_str
+                    await set_str("odds_cache_payload", _json.dumps(events))
+                    await set_str("odds_cache_ts", str(now_wall))
+                except Exception as ce:
+                    logger.debug(f"odds db-cache write failed: {ce}")
                 return events
         except Exception as e:
             logger.warning(f"the-odds-api fetch failed: {e}")
