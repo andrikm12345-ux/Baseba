@@ -283,20 +283,8 @@ def _ai_to_signal(ai_result: dict, preds_row: pd.Series) -> Signal | None:
             is_value=True,
         )
 
-    # Без коэффициентов: ITB публикуем только с книгой
-    if market == "ITB":
-        return None
-    # ML/TOTAL без книги — MODEL сигнал при confidence >= 60%
-    if confidence < 0.60:
-        return None
-    return Signal(
-        match_id=int(preds_row["match_id"]),
-        market=market, pick=pick,
-        model_prob=confidence, fair_odds=fair_odds,
-        book_odds=0.0, edge=0.0,
-        confidence=confidence, stake_units=1.0,
-        is_value=False,
-    )
+    # Без коэффициентов — не публикуем ни один рынок
+    return None
 
 
 async def _apply_ai_ensemble(
