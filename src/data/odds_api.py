@@ -290,19 +290,47 @@ def _event_teams(ev: Dict[str, Any]) -> Tuple[str, str]:
 
 def _best_match(
     home_name: str, away_name: str, kickoff: datetime, events: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    best = None
+) -> Optional[Tuple[Dict[str, Any], bool]]:
+    """Return (event, is_swapped) or None.
+
+    is_swapped=True means the Odds API has home/away in reversed order —
+    the caller must swap odds_ml_home ↔ odds_ml_away etc.
+    """
+    best_ev = None
     best_score = 0.0
+    best_swapped = False
+
     for ev in events:
         ev_time = _event_kickoff(ev)
         if ev_time and abs((ev_time - kickoff).total_seconds()) > 6 * 3600:
             continue
         h, a = _event_teams(ev)
-        score = (_sim(home_name, h) + _sim(away_name, a)) / 2
-        if score > best_score and score > 0.50:
+        if not h or not a:
+            continue
+
+        # Direct order: home→h, away→a
+        s_direct = (_sim(home_name, h) + _sim(away_name, a)) / 2
+        # Reversed order: home→a, away→h (some providers list teams differently)
+        s_rev = (_sim(home_name, a) + _sim(away_name, h)) / 2
+
+        score = max(s_direct, s_rev)
+        swapped = s_rev > s_direct
+
+        if score > best_score and score > 0.75:
             best_score = score
-            best = ev
-    return best
+            best_ev = ev
+            best_swapped = swapped
+
+    if best_ev is not None:
+        h, a = _event_teams(best_ev)
+        logger.info(
+            f"odds match [{home_name} vs {away_name}] → "
+            f"[{h} vs {a}] score={best_score:.2f} swapped={best_swapped}"
+        )
+    else:
+        logger.debug(f"odds match: no event found for [{home_name} vs {away_name}]")
+
+    return (best_ev, best_swapped) if best_ev is not None else None
 
 
 # ─── odds parsing ───────────────────────────────────────────────────────────
@@ -498,9 +526,10 @@ async def fetch_odds_for_matches(
         events = events_cache.get(league) or []
         if not events:
             continue
-        ev = _best_match(home, away, kickoff, events)
-        if not ev:
+        result = _best_match(home, away, kickoff, events)
+        if result is None:
             continue
+        ev, is_swapped = result
         ev_id = ev.get("id") or ev.get("eventId") or ev.get("event_id")
         if not ev_id:
             continue
@@ -508,7 +537,36 @@ async def fetch_odds_for_matches(
         if not payload:
             continue
         odds = extract_odds(payload)
+
+        # If teams were matched in reversed order, swap home↔away odds
+        if is_swapped:
+            odds["odds_ml_home"], odds["odds_ml_away"] = odds["odds_ml_away"], odds["odds_ml_home"]
+            odds["odds_rl_home"], odds["odds_rl_away"] = odds["odds_rl_away"], odds["odds_rl_home"]
+            odds["odds_rl_home_lay"], odds["odds_rl_away_cover"] = (
+                odds["odds_rl_away_cover"], odds["odds_rl_home_lay"]
+            )
+            odds["odds_itb_home"], odds["odds_itb_away"] = odds["odds_itb_away"], odds["odds_itb_home"]
+            logger.info(
+                f"odds swap applied for match_id={match_id} [{home} vs {away}]: "
+                f"ml_home={odds['odds_ml_home']:.2f} ml_away={odds['odds_ml_away']:.2f}"
+            )
+
+        # Sanity check: ML vigorish should be 2–15% (implied probs sum 1.02–1.15)
+        h_ml, a_ml = odds.get("odds_ml_home", 0.0), odds.get("odds_ml_away", 0.0)
+        if h_ml > 0 and a_ml > 0:
+            vig = 1 / h_ml + 1 / a_ml
+            if not (1.02 <= vig <= 1.20):
+                logger.warning(
+                    f"odds sanity FAIL match_id={match_id} [{home} vs {away}]: "
+                    f"ml_home={h_ml:.2f} ml_away={a_ml:.2f} vig={vig:.3f} — discarding"
+                )
+                continue
+
         if any(v > 0 for v in odds.values()):
             out[match_id] = odds
+            logger.info(
+                f"odds OK match_id={match_id} [{home} vs {away}]: "
+                f"ml_home={h_ml:.2f} ml_away={a_ml:.2f}"
+            )
 
     return out
