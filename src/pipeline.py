@@ -156,12 +156,22 @@ async def generate_and_broadcast(bot) -> int:
         df["utc_date"] = df["utc_date"].dt.tz_convert("UTC").dt.tz_localize(None)
 
     finished = df[df["status"] == "FINISHED"].copy()
-    upcoming = df[df["status"] != "FINISHED"].copy()
+    all_upcoming = df[df["status"] != "FINISHED"].copy()
+
+    # Сигналы только для игр, начинающихся в ближайшие 5 часов
+    now = datetime.utcnow()
+    horizon = now + timedelta(hours=5)
+    upcoming = all_upcoming[
+        (all_upcoming["utc_date"] >= now) &
+        (all_upcoming["utc_date"] <= horizon)
+    ].copy()
     logger.info(
-        f"generate_and_broadcast: total={len(df)} finished={len(finished)} upcoming={len(upcoming)}"
+        f"generate_and_broadcast: total={len(df)} finished={len(finished)} "
+        f"upcoming_all={len(all_upcoming)} in_5h_window={len(upcoming)} "
+        f"window=[{now.strftime('%H:%M')},{horizon.strftime('%H:%M')} UTC]"
     )
     if upcoming.empty:
-        logger.info("No upcoming games in DB")
+        logger.info("No games starting within 5 hours")
         return 0
     feats = build_inference_features(upcoming, finished)
     if feats.empty:
@@ -207,23 +217,11 @@ async def generate_and_broadcast(bot) -> int:
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
     ai_on = await get_bool("ai_ensemble_enabled", False)
-    broadcast_horizon = datetime.utcnow() + timedelta(hours=5)
     if new_rows and bot:
         async with SessionLocal() as session:
             for row in new_rows:
                 match = await session.get(Match, row.match_id)
                 if not match:
-                    continue
-                # Рассылаем только если игра начинается в ближайшие 5 часов
-                game_time = match.utc_date
-                if hasattr(game_time, "tzinfo") and game_time.tzinfo is not None:
-                    game_time = game_time.replace(tzinfo=None)
-                if game_time > broadcast_horizon:
-                    logger.debug(
-                        f"signal match_id={row.match_id} skipped — game in "
-                        f"{(game_time - datetime.utcnow()).seconds // 3600}h "
-                        f"(>{5}h window)"
-                    )
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
