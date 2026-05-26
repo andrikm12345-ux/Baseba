@@ -135,8 +135,8 @@ def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Si
             confidence=float(prob), stake_units=float(round(stake, 2)),
             is_value=True,
         )]
-    # RL и ITB без реальных коэффициентов не публикуем
-    if market in ("RL", "ITB"):
+    # Без реальных коэффициентов сигналы не публикуем — нет VALUE без кэфов
+    if market in ("RL", "ITB", "ML", "TOTAL"):
         return []
     model_floor = floor if ai_applied else max(settings.min_confidence, 0.60)
     if prob >= model_floor:
