@@ -62,6 +62,8 @@ def _book_odds_for(row: pd.Series, market: str, pick: str) -> Optional[float]:
         ("TOTAL", "UNDER"): "odds_under85",
         ("ITB", "HOME_OVER"): "odds_itb_home",
         ("ITB", "AWAY_OVER"): "odds_itb_away",
+        ("F5", "HOME"): "odds_f5_home",
+        ("F5", "AWAY"): "odds_f5_away",
     }.get((market, pick))
     if col and col in row and pd.notna(row[col]) and row[col] > 1.0:
         return float(row[col])
@@ -91,6 +93,10 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
             candidates.extend(_make_signal(row, "ITB", "HOME_OVER", p_itb_home))
         if p_itb_away >= settings.min_confidence:
             candidates.extend(_make_signal(row, "ITB", "AWAY_OVER", p_itb_away))
+
+        # F5 — первые 5 иннингов (те же вероятности что и ML)
+        f5_pick, f5_prob = _best_ml(row)
+        candidates.extend(_make_signal(row, "F5", f5_pick, f5_prob))
 
     # Одна игра = одна ставка: оставляем лучший сигнал по матчу
     best: dict[int, Signal] = {}
@@ -136,7 +142,7 @@ def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Si
             is_value=True,
         )]
     # Без реальных коэффициентов сигналы не публикуем — нет VALUE без кэфов
-    if market in ("RL", "ITB", "ML", "TOTAL"):
+    if market in ("RL", "ITB", "ML", "TOTAL", "F5"):
         return []
     model_floor = floor if ai_applied else max(settings.min_confidence, 0.60)
     if prob >= model_floor:

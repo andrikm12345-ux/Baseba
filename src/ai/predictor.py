@@ -97,16 +97,18 @@ Coors Field (Колорадо) ≈ +1.5 рана. Petco Park (Сан-Диего)
 - **ML**: кто победит? Лучший при явном преимуществе одного питчера (ERA diff > 0.75).
 - **TOTAL** (> / < {total_line}): лучший при доминирующих стартерах ИЛИ выраженной погоде.
 - **ITB** (> {itb_line} ранов одной командой): лучший при явно слабом питчере соперника.
+- **F5** (первые 5 иннингов): лучший когда оба стартера сильные (ERA < 3.5) — нет зависимости от буллпена.
 
 Выбери рынок с максимальным edge. Если неопределённость высока — TOTAL. НЕ ставь если confidence < 0.55.
 
 Верни СТРОГО JSON без markdown, рассуждения строго на русском:
 {{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения"}}
 
-market: "ML" | "TOTAL" | "ITB"
+market: "ML" | "TOTAL" | "ITB" | "F5"
 pick для ML: "HOME" | "AWAY"
 pick для TOTAL: "OVER" | "UNDER"
 pick для ITB: "HOME_OVER" | "AWAY_OVER"
+pick для F5: "HOME" | "AWAY"
 confidence: 0.50–0.90"""
 
 
@@ -126,6 +128,12 @@ P(победа {home}) ≈ {p_home:.0%} | P(победа {away}) ≈ {p_away:.0%
 P(тотал > {total_line}) ≈ {p_over85:.0%}
 P(ИТБ хоз > {itb_line}) ≈ {p_itb_home:.0%} | P(ИТБ гост > {itb_line}) ≈ {p_itb_away:.0%}
 Из БД: {home} — {home_pitcher_name} (ERA {home_era}, WHIP {home_whip}) | {away} — {away_pitcher_name} (ERA {away_era}, WHIP {away_whip})
+
+## СТАТИСТИКА СЕЗОНА
+
+Последние 10 игр: {home} — {home_w10}/{home_g10} (ср. {home_avg_runs} ранов/игру)
+Последние 10 игр: {away} — {away_w10}/{away_g10} (ср. {away_avg_runs} ранов/игру)
+H2H в этом сезоне ({h2h_games} игр): {home} {h2h_home_wins}–{h2h_away_wins} {away}
 
 ## ДАННЫЕ ИЗ ВЕБ-ПОИСКА
 
@@ -154,16 +162,18 @@ Coors Field (Колорадо) ≈ +1.5 рана. Petco Park (Сан-Диего)
 - **ML**: кто победит? Лучший при явном преимуществе одного питчера.
 - **TOTAL** (> / < {total_line}): лучший при доминирующих стартерах ИЛИ выраженной погоде.
 - **ITB** (> {itb_line}): лучший при явно слабом питчере соперника.
+- **F5** (первые 5 иннингов): лучший когда оба стартера сильные (ERA < 3.5) — нет зависимости от буллпена.
 
 Выбери рынок с максимальным edge. Если неопределённость высока — TOTAL. НЕ ставь если confidence < 0.55.
 
 Верни СТРОГО JSON без markdown, рассуждения строго на русском:
 {{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения"}}
 
-market: "ML" | "TOTAL" | "ITB"
+market: "ML" | "TOTAL" | "ITB" | "F5"
 pick для ML: "HOME" | "AWAY"
 pick для TOTAL: "OVER" | "UNDER"
 pick для ITB: "HOME_OVER" | "AWAY_OVER"
+pick для F5: "HOME" | "AWAY"
 confidence: 0.50–0.90"""
 
 
@@ -204,6 +214,7 @@ _VALID_PICKS = {
     "ML": {"HOME", "AWAY"},
     "TOTAL": {"OVER", "UNDER"},
     "ITB": {"HOME_OVER", "AWAY_OVER"},
+    "F5": {"HOME", "AWAY"},
 }
 
 
@@ -260,6 +271,15 @@ async def _build_proxy_prompt(home: str, away: str, cfg, ml_probs: dict, feature
         odds_under=_fmt(features.get("odds_under85")),
         rl_home=_fmt(features.get("odds_rl_home")),
         rl_away=_fmt(features.get("odds_rl_away")),
+        home_w10=features.get("home_last10_wins", 0),
+        home_g10=features.get("home_last10_games", 0),
+        home_avg_runs=features.get("home_avg_runs", 0.0),
+        away_w10=features.get("away_last10_wins", 0),
+        away_g10=features.get("away_last10_games", 0),
+        away_avg_runs=features.get("away_avg_runs", 0.0),
+        h2h_games=features.get("h2h_games", 0),
+        h2h_home_wins=features.get("h2h_home_wins", 0),
+        h2h_away_wins=features.get("h2h_away_wins", 0),
         web_pitchers=_format_web(web_pitchers),
         web_weather=_format_web(web_weather),
     )

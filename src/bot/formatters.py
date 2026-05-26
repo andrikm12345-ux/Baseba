@@ -14,6 +14,7 @@ MARKET_LABELS: dict[str, str] = {
     "TOTAL": f"Тотал ({settings.total_line})",
     "RL": f"Ран-лайн (±{settings.rl_line})",
     "ITB": f"ИТБ ({settings.itb_line})",
+    "F5": "Первые 5 иннингов",
 }
 
 PICK_LABELS: dict[str, str] = {

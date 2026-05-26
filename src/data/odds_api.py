@@ -21,7 +21,7 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "baseball_mlb"
 # us = FanDuel/DraftKings/BetMGM; eu = Pinnacle (sharpest lines)
 REGIONS = "us,eu"
-MARKETS = "h2h,totals,spreads"
+MARKETS = "h2h,totals,spreads,h2h_1st_5_innings"
 
 CACHE_TTL = 7200.0  # 2 hours
 
@@ -135,6 +135,29 @@ class OddsApiClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def fetch_mlb_scores(self) -> List[Dict[str, Any]]:
+        """Fetch recent MLB scores for settling signals. daysFrom=3 covers last 3 days."""
+        params = {
+            "apiKey": self.api_key,
+            "daysFrom": 3,
+            "dateFormat": "iso",
+        }
+        try:
+            session = await self._get_session()
+            url = f"{BASE_URL}/sports/{SPORT}/scores"
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                remaining = r.headers.get("x-requests-remaining", "?")
+                logger.debug(f"the-odds-api scores: remaining={remaining}")
+                if r.status >= 400:
+                    text = await r.text()
+                    logger.warning(f"the-odds-api scores {r.status}: {text[:200]}")
+                    return []
+                data = await r.json()
+                return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"the-odds-api scores fetch failed: {e}")
+            return []
+
     async def fetch_mlb_odds(self) -> List[Dict[str, Any]]:
         """Fetch all upcoming MLB games with ML/totals/spreads odds.
 
@@ -238,13 +261,26 @@ def extract_odds_v4(event: Dict[str, Any]) -> Dict[str, float]:
     rl_away: List[float] = []   # away +1.5
     rl_away_c: List[float] = [] # away -1.5 (away favored)
     rl_home_l: List[float] = [] # home +1.5
+    f5_home: List[float] = []   # first 5 innings home
+    f5_away: List[float] = []   # first 5 innings away
 
     for bk in event.get("bookmakers", []):
         for market in bk.get("markets", []):
             key = market.get("key", "")
             outcomes = market.get("outcomes", [])
 
-            if key == "h2h":
+            if key == "h2h_1st_5_innings":
+                for o in outcomes:
+                    price = _as_float(o.get("price"))
+                    if price is None:
+                        continue
+                    name = o.get("name", "")
+                    if _canonical(name) == _canonical(home_team):
+                        f5_home.append(price)
+                    elif _canonical(name) == _canonical(away_team):
+                        f5_away.append(price)
+
+            elif key == "h2h":
                 for o in outcomes:
                     price = _as_float(o.get("price"))
                     if price is None:
@@ -312,6 +348,8 @@ def extract_odds_v4(event: Dict[str, Any]) -> Dict[str, float]:
         "odds_rl_home_lay": _best(rl_home_l),
         "odds_itb_home": 0.0,
         "odds_itb_away": 0.0,
+        "odds_f5_home": _best(f5_home),
+        "odds_f5_away": _best(f5_away),
     }
 
 

@@ -22,7 +22,7 @@ from src.data.settings_store import get_bool
 from src.ml.predict import Predictor
 from src.ml.train import train_all, save_all_to_db
 from src.signals.generator import Signal, generate, _book_odds_for, _kelly, MAX_EDGE
-from src.signals.tracker import settle_pending
+from src.signals.tracker import settle_pending, enrich_scores_from_odds_api
 
 
 async def _load_games_df() -> pd.DataFrame:
@@ -200,7 +200,7 @@ async def generate_and_broadcast(bot) -> int:
             await odds_client.close()
         for col in ["odds_ml_home", "odds_ml_away", "odds_over85", "odds_under85",
                     "odds_rl_home", "odds_rl_away", "odds_rl_away_cover", "odds_rl_home_lay",
-                    "odds_itb_home", "odds_itb_away"]:
+                    "odds_itb_home", "odds_itb_away", "odds_f5_home", "odds_f5_away"]:
             preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
         logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} games")
 
@@ -363,9 +363,21 @@ async def _apply_ai_ensemble(
             feat_dict["away_pitcher_name"] = match_obj.away_pitcher_name
             # Передаём реальные кэфы из Odds API в AI-промпт (не из Tavily-поиска)
             for odds_col in ("odds_ml_home", "odds_ml_away", "odds_over85",
-                             "odds_under85", "odds_rl_home", "odds_rl_away"):
+                             "odds_under85", "odds_rl_home", "odds_rl_away",
+                             "odds_f5_home", "odds_f5_away"):
                 if odds_col in row and pd.notna(row[odds_col]):
                     feat_dict[odds_col] = float(row[odds_col])
+            # Добавляем H2H и форму команд из БД
+            try:
+                from src.data.team_stats import get_team_context
+                ctx = await get_team_context(
+                    match_obj.home_team_id,
+                    match_obj.away_team_id,
+                    match_obj.season or 2026,
+                )
+                feat_dict.update(ctx)
+            except Exception as _ctx_err:
+                logger.debug(f"get_team_context failed for {mid}: {_ctx_err}")
             ai = await ai_predict(
                 match_id=mid,
                 home=home, away=away, competition=comp,
@@ -402,6 +414,12 @@ async def _apply_ai_ensemble(
 async def daily_cycle(bot) -> None:
     logger.info("Daily cycle start")
     await refresh_upcoming(days=7)
+    if settings.odds_api_key:
+        _odds_settle_client = OddsApiClient(settings.odds_api_key)
+        try:
+            await enrich_scores_from_odds_api(_odds_settle_client)
+        finally:
+            await _odds_settle_client.close()
     await settle_pending()
     await train_models(bot=bot)
     await generate_and_broadcast(bot)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import List
 
 from loguru import logger
@@ -15,6 +16,9 @@ def _did_win(market: str, pick: str, home_runs: int, away_runs: int) -> bool:
     total = home_runs + away_runs
     diff = home_runs - away_runs
     if market == "ML":
+        return (home_runs > away_runs) if pick == "HOME" else (away_runs > home_runs)
+    if market == "F5":
+        # Use full game result as proxy (not perfect but acceptable until F5 scores available)
         return (home_runs > away_runs) if pick == "HOME" else (away_runs > home_runs)
     if market == "TOTAL":
         return (total > settings.total_line) if pick == "OVER" else (total < settings.total_line)
@@ -104,3 +108,72 @@ async def roi_stats(
         roi=(profit / staked * 100.0) if staked > 0 else 0.0,
         hit_rate=(won / n * 100.0) if n > 0 else 0.0,
     )
+
+
+async def enrich_scores_from_odds_api(client) -> int:
+    """Update home_runs/away_runs for matches that are missing scores via Odds API /scores."""
+    from src.data.database import Team
+    from src.data.odds_api import _canonical, _sim
+
+    scores = await client.fetch_mlb_scores()
+    if not scores:
+        return 0
+
+    updated = 0
+    async with SessionLocal() as session:
+        for ev in scores:
+            if not ev.get("completed"):
+                continue
+            scores_data = ev.get("scores")
+            if not scores_data:
+                continue
+            home_name = ev.get("home_team", "")
+            away_name = ev.get("away_team", "")
+            home_score = None
+            away_score = None
+            for team_key, score_val in scores_data.items():
+                # scores format: {"home_team_name": {"score": "5"}, "away_team_name": {"score": "3"}}
+                try:
+                    score_int = int(score_val.get("score", ""))
+                except (ValueError, AttributeError):
+                    continue
+                if _sim(team_key, home_name) > 0.8:
+                    home_score = score_int
+                elif _sim(team_key, away_name) > 0.8:
+                    away_score = score_int
+
+            if home_score is None or away_score is None:
+                continue
+
+            # Find matching match in DB by team names + date
+            commence = ev.get("commence_time")
+            from datetime import datetime
+            try:
+                game_dt = datetime.fromisoformat(commence.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                continue
+
+            # Find by home team name + date window
+            home_teams = (await session.execute(
+                select(Team).where(Team.name.ilike(f"%{home_name.split()[-1]}%"))
+            )).scalars().all()
+
+            for ht in home_teams:
+                matches = (await session.execute(
+                    select(Match).where(
+                        Match.home_team_id == ht.id,
+                        Match.utc_date >= game_dt - timedelta(hours=4),
+                        Match.utc_date <= game_dt + timedelta(hours=4),
+                    )
+                )).scalars().all()
+                for m in matches:
+                    if m.home_runs is None:
+                        m.home_runs = home_score
+                        m.away_runs = away_score
+                        m.status = "FINISHED"
+                        updated += 1
+        await session.commit()
+
+    if updated:
+        logger.info(f"enrich_scores_from_odds_api: updated {updated} matches")
+    return updated
