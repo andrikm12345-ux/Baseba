@@ -153,10 +153,96 @@ class OddsApiClient:
         return data
 
 
+# ─── team name normalisation ────────────────────────────────────────────────
+
+_MLB_CANONICAL: Dict[str, str] = {
+    # Arizona
+    "arizona diamondbacks": "arizona diamondbacks", "diamondbacks": "arizona diamondbacks",
+    "d-backs": "arizona diamondbacks", "az diamondbacks": "arizona diamondbacks",
+    # Atlanta
+    "atlanta braves": "atlanta braves", "braves": "atlanta braves",
+    # Baltimore
+    "baltimore orioles": "baltimore orioles", "orioles": "baltimore orioles",
+    # Boston
+    "boston red sox": "boston red sox", "red sox": "boston red sox",
+    # Chicago Cubs
+    "chicago cubs": "chicago cubs", "cubs": "chicago cubs",
+    # Chicago White Sox
+    "chicago white sox": "chicago white sox", "white sox": "chicago white sox",
+    # Cincinnati
+    "cincinnati reds": "cincinnati reds", "reds": "cincinnati reds",
+    # Cleveland
+    "cleveland guardians": "cleveland guardians", "guardians": "cleveland guardians",
+    # Colorado
+    "colorado rockies": "colorado rockies", "rockies": "colorado rockies",
+    # Detroit
+    "detroit tigers": "detroit tigers", "tigers": "detroit tigers",
+    # Houston
+    "houston astros": "houston astros", "astros": "houston astros",
+    # Kansas City
+    "kansas city royals": "kansas city royals", "royals": "kansas city royals",
+    "kc royals": "kansas city royals",
+    # LA Angels
+    "los angeles angels": "los angeles angels", "angels": "los angeles angels",
+    "la angels": "los angeles angels", "anaheim angels": "los angeles angels",
+    "angel stadium": "los angeles angels",
+    # LA Dodgers
+    "los angeles dodgers": "los angeles dodgers", "dodgers": "los angeles dodgers",
+    "la dodgers": "los angeles dodgers",
+    # Miami
+    "miami marlins": "miami marlins", "marlins": "miami marlins",
+    # Milwaukee
+    "milwaukee brewers": "milwaukee brewers", "brewers": "milwaukee brewers",
+    # Minnesota
+    "minnesota twins": "minnesota twins", "twins": "minnesota twins",
+    # NY Mets
+    "new york mets": "new york mets", "mets": "new york mets",
+    "ny mets": "new york mets",
+    # NY Yankees
+    "new york yankees": "new york yankees", "yankees": "new york yankees",
+    "ny yankees": "new york yankees",
+    # Oakland / Athletics
+    "oakland athletics": "oakland athletics", "athletics": "oakland athletics",
+    "a's": "oakland athletics", "as": "oakland athletics",
+    "oakland a's": "oakland athletics", "sacramento athletics": "oakland athletics",
+    # Philadelphia
+    "philadelphia phillies": "philadelphia phillies", "phillies": "philadelphia phillies",
+    # Pittsburgh
+    "pittsburgh pirates": "pittsburgh pirates", "pirates": "pittsburgh pirates",
+    # San Diego
+    "san diego padres": "san diego padres", "padres": "san diego padres",
+    # San Francisco
+    "san francisco giants": "san francisco giants", "giants": "san francisco giants",
+    "sf giants": "san francisco giants",
+    # Seattle
+    "seattle mariners": "seattle mariners", "mariners": "seattle mariners",
+    # St. Louis
+    "st. louis cardinals": "st. louis cardinals", "st louis cardinals": "st. louis cardinals",
+    "cardinals": "st. louis cardinals",
+    # Tampa Bay
+    "tampa bay rays": "tampa bay rays", "rays": "tampa bay rays",
+    # Texas
+    "texas rangers": "texas rangers", "rangers": "texas rangers",
+    # Toronto
+    "toronto blue jays": "toronto blue jays", "blue jays": "toronto blue jays",
+    # Washington
+    "washington nationals": "washington nationals", "nationals": "washington nationals",
+    "nats": "washington nationals",
+}
+
+
+def _canonical(name: str) -> str:
+    """Normalize MLB team name to canonical form for exact matching."""
+    return _MLB_CANONICAL.get(name.lower().strip(), name.lower().strip())
+
+
 # ─── matching ───────────────────────────────────────────────────────────────
 
 def _sim(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    ca, cb = _canonical(a), _canonical(b)
+    if ca == cb:
+        return 1.0
+    return SequenceMatcher(None, ca, cb).ratio()
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:

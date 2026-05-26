@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List
 
 import pandas as pd
@@ -156,22 +156,12 @@ async def generate_and_broadcast(bot) -> int:
         df["utc_date"] = df["utc_date"].dt.tz_convert("UTC").dt.tz_localize(None)
 
     finished = df[df["status"] == "FINISHED"].copy()
-    now = datetime.utcnow()
-    # Окно: игры за 6 ч вперёд + 4 ч назад (чтобы не пропустить если бот был недоступен)
-    horizon = now + timedelta(hours=6)
-    cutoff = now - timedelta(hours=4)
-    upcoming = df[
-        (df["status"] != "FINISHED")
-        & (df["utc_date"] >= cutoff)
-        & (df["utc_date"] <= horizon)
-    ].copy()
+    upcoming = df[df["status"] != "FINISHED"].copy()
     logger.info(
-        f"generate_and_broadcast: total={len(df)} finished={len(finished)} "
-        f"upcoming_in_window={len(upcoming)} "
-        f"window=[{cutoff.strftime('%H:%M')},{horizon.strftime('%H:%M')} UTC]"
+        f"generate_and_broadcast: total={len(df)} finished={len(finished)} upcoming={len(upcoming)}"
     )
     if upcoming.empty:
-        logger.info("No upcoming games in the signal window")
+        logger.info("No upcoming games in DB")
         return 0
     feats = build_inference_features(upcoming, finished)
     if feats.empty:
