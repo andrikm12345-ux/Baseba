@@ -19,9 +19,9 @@ from src.config import settings
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "baseball_mlb"
-REGIONS = "us"
+# us = FanDuel/DraftKings/BetMGM; eu = Pinnacle (sharpest lines)
+REGIONS = "us,eu"
 MARKETS = "h2h,totals,spreads"
-BOOKMAKERS = "pinnacle,fanduel,draftkings,betmgm"
 
 CACHE_TTL = 7200.0  # 2 hours
 
@@ -150,7 +150,6 @@ class OddsApiClient:
             "apiKey": self.api_key,
             "regions": REGIONS,
             "markets": MARKETS,
-            "bookmakers": BOOKMAKERS,
             "dateFormat": "iso",
             "oddsFormat": "decimal",
         }
