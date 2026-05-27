@@ -900,32 +900,130 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
 
 
 async def broadcast_morning_digest(bot: Bot) -> None:
-    """Send a morning digest of today's upcoming game signals (MSK day, future games only)."""
+    """Утренний дайджест = расписание сегодняшних игр с прогнозом модели.
+
+    НЕ показывает сигналы (их ещё нет — они придут за 5ч до игры).
+    Показывает ВСЕ сегодняшние игры с питчерами и вероятностями из ML-модели.
+    """
+    from src.ml.predict import Predictor
+    from src.data.features import build_inference_features
+
     now_utc = datetime.utcnow()
-    # MSK day ends at 21:00 UTC (= midnight MSK). Show all games from now until end of MSK day.
+    msk = timezone(timedelta(hours=3))
+
+    # Конец сегодняшнего MSK-дня = 21:00 UTC (= 00:00 МСК следующего дня)
     msk_day_end_utc = datetime.combine(now_utc.date(), datetime.min.time()) + timedelta(hours=21)
     if now_utc >= msk_day_end_utc:
         msk_day_end_utc += timedelta(days=1)
+
     async with SessionLocal() as session:
-        signals = (await session.execute(
-            select(Signal).join(Match).where(
-                Match.utc_date > now_utc,           # только будущие игры
-                Match.utc_date <= msk_day_end_utc,  # до конца сегодняшнего MSK-дня
-                Match.status != "FINISHED",          # не завершённые
-            ).order_by(Match.utc_date.asc())        # по времени начала игры
+        # Все сегодняшние игры которые ещё не начались
+        today_matches = (await session.execute(
+            select(Match).where(
+                Match.utc_date > now_utc,
+                Match.utc_date <= msk_day_end_utc,
+                Match.status != "FINISHED",
+            ).order_by(Match.utc_date.asc())
         )).scalars().all()
-        matches = {}
-        teams = {}
-        for s in signals:
-            m = await session.get(Match, s.match_id)
-            if m:
-                matches[s.match_id] = m
-                teams[m.home_team_id] = await session.get(Team, m.home_team_id)
-                teams[m.away_team_id] = await session.get(Team, m.away_team_id)
-    if not signals:
+
+        if not today_matches:
+            return
+
+        teams_cache: dict[int, Team] = {}
+        for m in today_matches:
+            for tid in (m.home_team_id, m.away_team_id):
+                if tid not in teams_cache:
+                    t = await session.get(Team, tid)
+                    if t:
+                        teams_cache[tid] = t
+
+    if not today_matches:
         return
-    text = "☀️ <b>Утренний дайджест — MLB</b>\n\n" + format_signal_short(signals, matches, teams)
-    await broadcast_signal(bot, text)
+
+    msk_now_str = now_utc.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%d.%m")
+    lines = [f"☀️ <b>Расписание MLB на {msk_now_str}</b> — {len(today_matches)} игр\n"]
+
+    predictor = Predictor()
+
+    for m in today_matches:
+        home_t = teams_cache.get(m.home_team_id)
+        away_t = teams_cache.get(m.away_team_id)
+        home_name = home_t.name if home_t else f"Team#{m.home_team_id}"
+        away_name = away_t.name if away_t else f"Team#{m.away_team_id}"
+
+        # Аббревиатура команды (последние 3 буквы или первые 3 слова)
+        def _abbr(name: str) -> str:
+            parts = name.split()
+            return parts[-1][:3].upper() if parts else name[:3].upper()
+
+        home_abbr = _abbr(home_name)
+        away_abbr = _abbr(away_name)
+
+        game_msk = m.utc_date.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
+        signal_msk = (m.utc_date - timedelta(hours=5)).replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
+
+        # Питчеры
+        hp = f"{m.home_pitcher_name or '?'} ERA {m.home_pitcher_era or '?'}"
+        ap = f"{m.away_pitcher_name or '?'} ERA {m.away_pitcher_era or '?'}"
+
+        # ML-вероятности если модель готова
+        prob_str = ""
+        if predictor.ready:
+            try:
+                import pandas as pd
+                from src.data.database import SessionLocal as SL
+                # Быстрый прогноз через predict
+                row_df = pd.DataFrame([{
+                    "match_id": m.id,
+                    "home_team_id": m.home_team_id,
+                    "away_team_id": m.away_team_id,
+                    "home_pitcher_era": m.home_pitcher_era or 4.5,
+                    "home_pitcher_whip": m.home_pitcher_whip or 1.3,
+                    "home_pitcher_k9": m.home_pitcher_k9 or 8.0,
+                    "home_pitcher_bb9": m.home_pitcher_bb9 or 3.0,
+                    "away_pitcher_era": m.away_pitcher_era or 4.5,
+                    "away_pitcher_whip": m.away_pitcher_whip or 1.3,
+                    "away_pitcher_k9": m.away_pitcher_k9 or 8.0,
+                    "away_pitcher_bb9": m.away_pitcher_bb9 or 3.0,
+                    "era_diff": (m.home_pitcher_era or 4.5) - (m.away_pitcher_era or 4.5),
+                    "home_win_rate": 0.5, "away_win_rate": 0.5,
+                    "home_run_rate": 4.5, "away_run_rate": 4.5,
+                    "h2h_home_win_rate": 0.5,
+                }])
+                preds = predictor.predict(row_df)
+                if not preds.empty:
+                    p_h = float(preds.iloc[0].get("p_home", 0.5))
+                    p_a = float(preds.iloc[0].get("p_away", 0.5))
+                    fav = home_abbr if p_h >= p_a else away_abbr
+                    fav_p = max(p_h, p_a)
+                    prob_str = f" · {fav} {fav_p:.0%}"
+            except Exception:
+                pass
+
+        # Уже есть сигнал?
+        signal_tag = ""
+        async with SessionLocal() as sess:
+            existing_sig = (await sess.execute(
+                select(Signal).where(Signal.match_id == m.id)
+            )).scalar_one_or_none()
+        if existing_sig:
+            from src.bot.formatters import MARKET_LABELS, PICK_LABELS
+            mkt = MARKET_LABELS.get(existing_sig.market, existing_sig.market)
+            pick = PICK_LABELS.get(existing_sig.pick, existing_sig.pick)
+            if existing_sig.book_odds and existing_sig.book_odds > 1.0:
+                signal_tag = f"\n   ✅ Сигнал: {mkt} {pick} @ {existing_sig.book_odds:.2f}"
+            else:
+                signal_tag = f"\n   ⏰ Сигнал в ~{signal_msk} МСК"
+        else:
+            signal_tag = f"\n   ⏰ Сигнал в ~{signal_msk} МСК"
+
+        lines.append(
+            f"⚾ <b>{home_abbr}–{away_abbr}</b> {game_msk} МСК\n"
+            f"   🎯 {hp} / {ap}{prob_str}"
+            f"{signal_tag}"
+        )
+
+    await broadcast_signal(bot, "\n\n".join(lines))
 
 
 # ─── Catch-all ────────────────────────────────────────────────────────────────
