@@ -21,7 +21,7 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "baseball_mlb"
 # us = FanDuel/DraftKings/BetMGM; eu = Pinnacle (sharpest lines)
 REGIONS = "us,eu"
-MARKETS = "h2h,totals,spreads,h2h_1st_5_innings"
+MARKETS = "h2h,totals,spreads"
 
 CACHE_TTL = 7200.0  # 2 hours
 
