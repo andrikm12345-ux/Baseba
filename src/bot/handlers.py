@@ -333,7 +333,7 @@ async def cmd_refresh_odds(msg: Message):
         model_status = "✅ готовы" if models_ready else "⏳ ещё обучаются"
         next_signal_hint = ""
         if next_game:
-            signal_time = next_game.utc_date - timedelta(hours=3)
+            signal_time = next_game.utc_date - timedelta(hours=5)
             game_msk = (next_game.utc_date.replace(tzinfo=timezone.utc)
                         .astimezone(timezone(timedelta(hours=3)))).strftime("%d.%m %H:%M МСК")
             if signal_time <= now_utc:
