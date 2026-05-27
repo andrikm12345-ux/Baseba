@@ -900,16 +900,19 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
 
 
 async def broadcast_morning_digest(bot: Bot) -> None:
-    """Send a morning digest of today's game signals."""
-    today = datetime.utcnow().date()
-    start = datetime.combine(today, datetime.min.time())
-    end = start + timedelta(days=1)
+    """Send a morning digest of today's upcoming game signals (MSK day, future games only)."""
+    now_utc = datetime.utcnow()
+    # MSK day ends at 21:00 UTC (= midnight MSK). Show all games from now until end of MSK day.
+    msk_day_end_utc = datetime.combine(now_utc.date(), datetime.min.time()) + timedelta(hours=21)
+    if now_utc >= msk_day_end_utc:
+        msk_day_end_utc += timedelta(days=1)
     async with SessionLocal() as session:
         signals = (await session.execute(
             select(Signal).join(Match).where(
-                Match.utc_date >= start,
-                Match.utc_date < end,
-            ).order_by(Signal.created_at.desc())
+                Match.utc_date > now_utc,           # только будущие игры
+                Match.utc_date <= msk_day_end_utc,  # до конца сегодняшнего MSK-дня
+                Match.status != "FINISHED",          # не завершённые
+            ).order_by(Match.utc_date.asc())        # по времени начала игры
         )).scalars().all()
         matches = {}
         teams = {}
