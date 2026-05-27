@@ -1193,6 +1193,81 @@ async def cmd_digest_now(msg: Message):
     await msg.answer("✅ Дайджест отправлен.")
 
 
+@router.message(Command("test_odds"))
+async def cmd_test_odds(msg: Message):
+    """Direct Odds API connectivity test — bypasses cache."""
+    if not is_admin(msg.from_user.id):
+        return
+
+    import aiohttp
+    from src.data.odds_api import BASE_URL, SPORT, REGIONS, MARKETS
+
+    key = settings.odds_api_key
+    if not key:
+        await msg.answer("❌ ODDS_API_KEY не задан в переменных Railway!\nДобавь Variables → ODDS_API_KEY=твой_ключ")
+        return
+
+    await msg.answer(f"🔑 Ключ задан: ...{key[-6:]}\n⏳ Делаю прямой запрос к API (без кэша)...")
+
+    params = {
+        "apiKey": key,
+        "regions": REGIONS,
+        "markets": MARKETS,
+        "dateFormat": "iso",
+        "oddsFormat": "decimal",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{BASE_URL}/sports/{SPORT}/odds"
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                remaining = r.headers.get("x-requests-remaining", "?")
+                used = r.headers.get("x-requests-used", "?")
+                status = r.status
+
+                if status == 401:
+                    await msg.answer("❌ HTTP 401 — ключ неверный или просрочен\nПроверь ключ на https://the-odds-api.com/account/")
+                    return
+                if status == 422:
+                    body = await r.text()
+                    await msg.answer(f"❌ HTTP 422 — неверный параметр запроса\n<code>{body[:300]}</code>")
+                    return
+                if status == 429:
+                    await msg.answer("❌ HTTP 429 — превышен лимит запросов (500/месяц на бесплатном тарифе)\nКупи план или жди следующего месяца")
+                    return
+                if status >= 400:
+                    body = await r.text()
+                    await msg.answer(f"❌ HTTP {status}\n<code>{body[:300]}</code>")
+                    return
+
+                events = await r.json()
+                n = len(events) if isinstance(events, list) else 0
+
+                lines = [
+                    f"✅ <b>Odds API работает</b>",
+                    f"📊 Использовано запросов: {used}",
+                    f"📊 Осталось запросов: {remaining}",
+                    f"⚾ Событий в ответе: {n}",
+                ]
+                if n == 0:
+                    lines.append("⚠️ API вернул 0 событий — возможно нет активных рынков")
+                else:
+                    # Show first 3 events
+                    lines.append("\n<b>Первые события из ответа:</b>")
+                    for ev in events[:3]:
+                        ht = ev.get("home_team", "?")
+                        at = ev.get("away_team", "?")
+                        ct = ev.get("commence_time", "?")
+                        bk_count = len(ev.get("bookmakers", []))
+                        lines.append(f"• {ht} vs {at} | {ct} | {bk_count} букмекеров")
+                    if n > 3:
+                        lines.append(f"... и ещё {n-3} событий")
+
+                await msg.answer("\n".join(lines))
+
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка соединения: <code>{e}</code>")
+
+
 # ─── Catch-all ────────────────────────────────────────────────────────────────
 
 @router.message()
