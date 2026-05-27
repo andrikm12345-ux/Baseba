@@ -1026,6 +1026,17 @@ async def broadcast_morning_digest(bot: Bot) -> None:
     await broadcast_signal(bot, "\n\n".join(lines))
 
 
+# ─── Admin: send digest now ───────────────────────────────────────────────────
+
+@router.message(Command("digest_now"))
+async def cmd_digest_now(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("📤 Запускаю рассылку дайджеста всем подписчикам...")
+    await broadcast_morning_digest(msg.bot)
+    await msg.answer("✅ Дайджест отправлен.")
+
+
 # ─── Catch-all ────────────────────────────────────────────────────────────────
 
 @router.message()
