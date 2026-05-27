@@ -1026,7 +1026,163 @@ async def broadcast_morning_digest(bot: Bot) -> None:
     await broadcast_signal(bot, "\n\n".join(lines))
 
 
-# ─── Admin: send digest now ───────────────────────────────────────────────────
+# ─── Admin: check why signals are missing ─────────────────────────────────────
+
+@router.message(Command("check_signals"))
+async def cmd_check_signals(msg: Message):
+    """Diagnostic: show upcoming games with model probs, odds, and signal status."""
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("🔍 Диагностика сигналов...")
+
+    from src.ml.predict import Predictor
+    from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
+    from src.signals.generator import _book_odds_for, _kelly
+
+    now_utc = datetime.utcnow()
+    horizon = now_utc + timedelta(hours=12)
+
+    async with SessionLocal() as session:
+        upcoming = (await session.execute(
+            select(Match).where(
+                Match.status != "FINISHED",
+                Match.utc_date >= now_utc,
+                Match.utc_date <= horizon,
+            ).order_by(Match.utc_date.asc())
+        )).scalars().all()
+
+        teams_cache: dict[int, Team] = {}
+        for m in upcoming:
+            for tid in (m.home_team_id, m.away_team_id):
+                if tid not in teams_cache:
+                    t = await session.get(Team, tid)
+                    if t:
+                        teams_cache[tid] = t
+
+        # Already signaled?
+        signaled = set((await session.execute(
+            select(Signal.match_id).where(
+                Signal.match_id.in_([m.id for m in upcoming])
+            )
+        )).scalars().all())
+
+    if not upcoming:
+        await msg.answer("❌ Нет игр в ближайшие 12 часов в БД")
+        return
+
+    msk = timezone(timedelta(hours=3))
+    predictor = Predictor()
+
+    # Fetch odds
+    odds_map: dict = {}
+    if settings.odds_api_key:
+        client = OddsApiClient(settings.odds_api_key)
+        try:
+            tuples = []
+            async with SessionLocal() as session:
+                for m in upcoming:
+                    ht = teams_cache.get(m.home_team_id)
+                    at = teams_cache.get(m.away_team_id)
+                    if ht and at:
+                        tuples.append((m.id, m.competition, ht.name, at.name, m.utc_date))
+            odds_map = await fetch_odds_for_matches(client, tuples)
+        finally:
+            await client.close()
+
+    lines = [f"🔍 <b>Диагностика — {len(upcoming)} игр (ближайшие 12ч)</b>\n"]
+
+    import pandas as pd
+
+    for m in upcoming:
+        ht = teams_cache.get(m.home_team_id)
+        at = teams_cache.get(m.away_team_id)
+        hn = ht.name.split()[-1] if ht else "?"
+        an = at.name.split()[-1] if at else "?"
+        game_msk = m.utc_date.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
+
+        already = "✅ сигнал есть" if m.id in signaled else ""
+
+        # Model probs
+        p_home = p_away = 0.5
+        p_over = 0.5
+        if predictor.ready:
+            try:
+                row_df = pd.DataFrame([{
+                    "match_id": m.id,
+                    "home_team_id": m.home_team_id, "away_team_id": m.away_team_id,
+                    "home_pitcher_era": m.home_pitcher_era or 4.5,
+                    "home_pitcher_whip": m.home_pitcher_whip or 1.3,
+                    "home_pitcher_k9": m.home_pitcher_k9 or 8.0,
+                    "home_pitcher_bb9": m.home_pitcher_bb9 or 3.0,
+                    "away_pitcher_era": m.away_pitcher_era or 4.5,
+                    "away_pitcher_whip": m.away_pitcher_whip or 1.3,
+                    "away_pitcher_k9": m.away_pitcher_k9 or 8.0,
+                    "away_pitcher_bb9": m.away_pitcher_bb9 or 3.0,
+                    "era_diff": (m.home_pitcher_era or 4.5) - (m.away_pitcher_era or 4.5),
+                    "home_win_rate": 0.5, "away_win_rate": 0.5,
+                    "home_run_rate": 4.5, "away_run_rate": 4.5,
+                    "h2h_home_win_rate": 0.5,
+                }])
+                preds = predictor.predict(row_df)
+                if not preds.empty:
+                    p_home = float(preds.iloc[0].get("p_home", 0.5))
+                    p_away = float(preds.iloc[0].get("p_away", 0.5))
+                    p_over = float(preds.iloc[0].get("p_over85", 0.5))
+            except Exception as e:
+                p_home = p_away = p_over = -1.0
+
+        # Odds
+        odds = odds_map.get(m.id) or {}
+        ml_h = odds.get("odds_ml_home")
+        ml_a = odds.get("odds_ml_away")
+        tot_o = odds.get("odds_over85")
+        tot_u = odds.get("odds_under85")
+
+        # Check edge
+        signals_possible = []
+        if ml_h and p_home > 0:
+            e = p_home * ml_h - 1.0
+            flag = "✅" if e >= settings.min_edge and p_home >= settings.min_confidence else "❌"
+            signals_possible.append(f"ML HOME {flag} p={p_home:.0%} @{ml_h:.2f} edge={e:+.1%}")
+        if ml_a and p_away > 0:
+            e = p_away * ml_a - 1.0
+            flag = "✅" if e >= settings.min_edge and p_away >= settings.min_confidence else "❌"
+            signals_possible.append(f"ML AWAY {flag} p={p_away:.0%} @{ml_a:.2f} edge={e:+.1%}")
+        if tot_o and p_over > 0:
+            e = p_over * tot_o - 1.0
+            flag = "✅" if e >= settings.min_edge and p_over >= settings.min_confidence else "❌"
+            signals_possible.append(f"TOT Б {flag} p={p_over:.0%} @{tot_o:.2f} edge={e:+.1%}")
+        if tot_u and p_over > 0:
+            p_u = 1.0 - p_over
+            e = p_u * tot_u - 1.0
+            flag = "✅" if e >= settings.min_edge and p_u >= settings.min_confidence else "❌"
+            signals_possible.append(f"TOT М {flag} p={p_u:.0%} @{tot_u:.2f} edge={e:+.1%}")
+
+        odds_status = "📊 Кэфы есть" if odds else "⚠️ НЕТ КЭФОВ от Odds API"
+        model_status = "" if predictor.ready else "⚠️ модель не готова"
+
+        block = [f"⚾ <b>{hn}–{an}</b> {game_msk} МСК {already}"]
+        block.append(f"   {odds_status} {model_status}")
+        if p_home > 0:
+            block.append(f"   🧠 P(home)={p_home:.0%} P(away)={p_away:.0%} P(over)={p_over:.0%}")
+        for s in signals_possible:
+            block.append(f"   {s}")
+        if not signals_possible and not odds:
+            block.append(f"   → Нет кэфов = нет сигнала")
+        elif not any("✅" in s for s in signals_possible):
+            block.append(f"   → edge<{settings.min_edge:.0%} или prob<{settings.min_confidence:.0%}")
+
+        lines.append("\n".join(block))
+
+    lines.append(f"\n⚙️ Пороги: min_confidence={settings.min_confidence:.0%} min_edge={settings.min_edge:.0%}")
+
+    # Split into chunks if too long
+    full_text = "\n\n".join(lines)
+    chunk_size = 3800
+    for i in range(0, len(full_text), chunk_size):
+        await msg.answer(full_text[i:i+chunk_size])
+
+
 
 @router.message(Command("digest_now"))
 async def cmd_digest_now(msg: Message):

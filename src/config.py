@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     tavily_api_key: Optional[str] = None
     leagues: list[str] = ["mlb"]
     database_url: Optional[str] = None
-    min_edge: float = 0.05
+    min_edge: float = 0.03
     min_confidence: float = 0.55
     min_odds: float = 1.50
     max_odds: float = 4.50
