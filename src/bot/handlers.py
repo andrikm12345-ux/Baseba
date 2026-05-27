@@ -1030,6 +1030,82 @@ async def broadcast_morning_digest(bot: Bot) -> None:
     await broadcast_signal(bot, "\n\n".join(lines))
 
 
+async def broadcast_results_summary(bot: Bot) -> None:
+    """Сводка результатов вчерашних сигналов — отправляется в 10:00 МСК."""
+    msk = timezone(timedelta(hours=3))
+    now_msk = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(msk)
+
+    # Вчера в МСК: от 00:00 до 23:59 МСК
+    yesterday_msk = (now_msk - timedelta(days=1)).date()
+    start_utc = datetime.combine(yesterday_msk, datetime.min.time()).replace(
+        tzinfo=msk).astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = start_utc + timedelta(days=1)
+
+    async with SessionLocal() as session:
+        rows = list((await session.execute(
+            select(Signal)
+            .join(Match, Match.id == Signal.match_id)
+            .where(
+                Match.utc_date >= start_utc,
+                Match.utc_date < end_utc,
+                Signal.settled.is_(True),
+            )
+            .order_by(Match.utc_date.asc())
+        )).scalars())
+
+        if not rows:
+            return  # Нет закрытых сигналов — не беспокоим
+
+        match_cache: dict = {}
+        team_cache: dict = {}
+        for s in rows:
+            m = await session.get(Match, s.match_id)
+            if m:
+                match_cache[s.match_id] = m
+                for tid in (m.home_team_id, m.away_team_id):
+                    if tid not in team_cache:
+                        t = await session.get(Team, tid)
+                        if t:
+                            team_cache[tid] = t
+
+    won = [s for s in rows if s.won]
+    lost = [s for s in rows if not s.won]
+    total_profit = sum(s.profit_units or 0.0 for s in rows)
+    roi = (total_profit / len(rows) * 100) if rows else 0.0
+
+    date_label = f"{yesterday_msk.day} {_MONTHS_RU[yesterday_msk.month]}"
+    profit_emoji = "📈" if total_profit >= 0 else "📉"
+    profit_sign = "+" if total_profit >= 0 else ""
+
+    lines = [
+        f"📊 <b>Итоги {date_label}</b>\n",
+        f"✅ Выиграно: {len(won)}  ❌ Проиграно: {len(lost)}",
+        f"{profit_emoji} Профит: {profit_sign}{total_profit:.2f} ед.  (ROI {profit_sign}{roi:.1f}%)\n",
+    ]
+
+    for s in rows:
+        m = match_cache.get(s.match_id)
+        if not m:
+            continue
+        ht = team_cache.get(m.home_team_id)
+        at = team_cache.get(m.away_team_id)
+        h = (ht.short_name or ht.name.split()[-1]) if ht else "?"
+        a = (at.short_name or at.name.split()[-1]) if at else "?"
+
+        icon = "✅" if s.won else "❌"
+        score = f"{m.home_runs}:{m.away_runs}" if m.home_runs is not None else "–:–"
+        from src.bot.formatters import MARKET_LABELS, PICK_LABELS
+        mkt = {"ML": "ML", "TOTAL": "Тотал", "ITB": "ИТБ", "F5": "F5"}.get(s.market, s.market)
+        pick = PICK_LABELS.get(s.pick, s.pick)
+        odds_str = f" @ {s.book_odds:.2f}" if s.book_odds and s.book_odds > 1.0 else ""
+        profit = s.profit_units or 0.0
+        p_str = f"{'+' if profit >= 0 else ''}{profit:.2f}"
+
+        lines.append(f"{icon} {h}–{a} {score} | {mkt} {pick}{odds_str} → {p_str} ед.")
+
+    await broadcast_signal(bot, "\n".join(lines))
+
+
 # ─── Admin: check why signals are missing ─────────────────────────────────────
 
 @router.message(Command("check_signals"))

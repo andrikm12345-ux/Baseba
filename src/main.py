@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from src.bot.access import AccessMiddleware
-from src.bot.handlers import broadcast_morning_digest, router
+from src.bot.handlers import broadcast_morning_digest, broadcast_results_summary, router
 from src.config import settings
 from src.data.database import init_db
 from src.ml.predict import Predictor, restore_models_from_db
@@ -150,6 +150,7 @@ async def main() -> None:
     # Игры MLB идут ~3 часа — нужно быстро получать результаты для settle.
     scheduler.add_job(refresh_upcoming, "interval", minutes=30, kwargs={"days": 3}, id="refresh_upcoming")
     scheduler.add_job(broadcast_morning_digest, "cron", hour=9, minute=0, args=[bot], id="digest")
+    scheduler.add_job(broadcast_results_summary, "cron", hour=7, minute=0, args=[bot], id="results")
     scheduler.start()
 
     asyncio.create_task(_warmup(bot))
