@@ -883,7 +883,11 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
         deactivated = []
         for sub in subs:
             try:
-                await bot.send_message(sub.chat_id, text, parse_mode="HTML")
+                await bot.send_message(
+                    sub.chat_id, text,
+                    parse_mode="HTML",
+                    reply_markup=main_menu(),  # обновляем клавиатуру при каждой рассылке
+                )
                 sent += 1
             except Exception as e:
                 err_str = str(e).lower()

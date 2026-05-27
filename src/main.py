@@ -26,6 +26,26 @@ from src.pipeline import (
 from src.signals.tracker import settle_pending
 
 
+async def _push_keyboard_update(bot: Bot) -> None:
+    """Push updated keyboard to all active subscribers once on startup."""
+    from src.data.database import SessionLocal, Subscriber
+    from src.bot.keyboards import main_menu
+    from sqlalchemy import select
+    async with SessionLocal() as session:
+        subs = (await session.execute(
+            select(Subscriber).where(Subscriber.active.is_(True))
+        )).scalars().all()
+    for sub in subs:
+        try:
+            await bot.send_message(
+                sub.chat_id,
+                "📋 Меню обновлено — теперь доступна История ставок для всех.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            pass
+
+
 async def _warmup(bot: Bot) -> None:
     try:
         predictor = Predictor()
@@ -134,6 +154,7 @@ async def main() -> None:
 
     asyncio.create_task(_warmup(bot))
     asyncio.create_task(_notify_startup(bot))
+    asyncio.create_task(_push_keyboard_update(bot))
     logger.info("Scheduler started — MLB Baseball Signals bot is running")
 
     await dp.start_polling(bot)
