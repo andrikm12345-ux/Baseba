@@ -1,67 +1,36 @@
-"""End-to-end pipeline: ingest → features → train → predict → emit signals."""
+"""Pipeline: ingest → Claude AI analysis → emit signals.
+
+XGBoost model removed. Claude analyzes every game with real odds.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import List
 
-import pandas as pd
 from loguru import logger
 from sqlalchemy import select
 
 from src.ai.predictor import ai_predict
-from src.bot.formatters import format_signal, format_training_report
+from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
 from src.data.database import AiPrediction, Match, SessionLocal, Signal as SignalRow, Team
-from src.data.features import build_features, build_inference_features
 from src.data.mlb_api import MlbApiClient
 from src.data.ingest import ingest_history, ingest_upcoming
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
-from src.data.settings_store import get_bool
-from src.ml.predict import Predictor
-from src.ml.train import train_all, save_all_to_db
-from src.signals.generator import Signal, generate, _book_odds_for, _kelly, MAX_EDGE
+from src.signals.generator import Signal, _book_odds_for, _kelly, MAX_EDGE
 from src.signals.tracker import settle_pending, enrich_scores_from_odds_api
 
 
-async def _load_games_df() -> pd.DataFrame:
-    async with SessionLocal() as session:
-        rows = (await session.execute(select(Match))).scalars().all()
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame([
-        {
-            "id": m.id,
-            "utc_date": m.utc_date,
-            "home_team_id": m.home_team_id,
-            "away_team_id": m.away_team_id,
-            "home_runs": m.home_runs,
-            "away_runs": m.away_runs,
-            "competition": m.competition,
-            "status": m.status,
-            "home_pitcher_era": m.home_pitcher_era,
-            "home_pitcher_whip": m.home_pitcher_whip,
-            "home_pitcher_k9": m.home_pitcher_k9,
-            "home_pitcher_bb9": m.home_pitcher_bb9,
-            "away_pitcher_era": m.away_pitcher_era,
-            "away_pitcher_whip": m.away_pitcher_whip,
-            "away_pitcher_k9": m.away_pitcher_k9,
-            "away_pitcher_bb9": m.away_pitcher_bb9,
-        }
-        for m in rows
-    ])
-
-
 async def bootstrap_history(seasons: List[int] | None = None) -> int:
-    """Initial load of historical MLB data — call once after first deploy."""
     if seasons is None:
         this_year = datetime.utcnow().year
         seasons = [this_year - 3, this_year - 2, this_year - 1]
     client = MlbApiClient(sport_id=settings.mlb_sport_id)
     try:
-        n = await ingest_history(client, seasons)
-        return n
+        return await ingest_history(client, seasons)
     finally:
         await client.close()
 
@@ -74,40 +43,11 @@ async def refresh_upcoming(days: int = 7) -> int:
         await client.close()
 
 
-async def train_models(bot=None) -> None:
-    df = await _load_games_df()
-    if df.empty:
-        logger.warning("No games in DB — skip training")
-        return
-    finished = df[df["status"] == "FINISHED"].copy()
-    # Build features uses home_runs/away_runs columns
-    finished = finished.rename(columns={"home_runs": "home_runs", "away_runs": "away_runs"})
-    if len(finished) < 200:
-        logger.warning(f"Only {len(finished)} finished games — not training yet")
-        return
-    features = build_features(finished)
-    result = train_all(features)
-    logger.info(f"Models saved: {result['paths']}")
-    # Persist model files to database so they survive Railway restarts
-    await save_all_to_db()
-    if bot:
-        text = format_training_report(result["metrics"])
-        for admin_id in settings.admin_ids:
-            try:
-                await bot.send_message(admin_id, text, parse_mode="HTML")
-            except Exception as e:
-                logger.warning(f"train notify to {admin_id} failed: {e}")
-
-
-async def _store_signals(
-    signals: List[Signal], ai_match_ids: set[int] | None = None
-) -> List[SignalRow]:
-    """Persist signals. Одна игра = один сигнал — дедупликация по match_id."""
+async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
+    """Persist signals. One game = one signal (dedup by match_id)."""
     stored: List[SignalRow] = []
-    ai_ids = ai_match_ids or set()
     async with SessionLocal() as session:
         for s in signals:
-            # Одна игра = одна ставка: если сигнал для этого матча уже есть — пропускаем
             exists = (await session.execute(
                 select(SignalRow).where(SignalRow.match_id == s.match_id)
             )).scalar_one_or_none()
@@ -115,7 +55,7 @@ async def _store_signals(
                 continue
             row = SignalRow(
                 match_id=s.match_id, market=s.market, pick=s.pick,
-                is_ai_ensemble=(s.match_id in ai_ids),
+                is_ai_ensemble=True,
                 is_value=s.is_value,
                 model_prob=s.model_prob, fair_odds=s.fair_odds,
                 book_odds=s.book_odds, edge=s.edge, confidence=s.confidence,
@@ -127,96 +67,185 @@ async def _store_signals(
     return stored
 
 
+def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
+    """Convert Claude output to Signal using real book odds."""
+    market = ai_result.get("market")
+    pick = ai_result.get("pick")
+    confidence = float(ai_result.get("confidence", 0.0))
+    if not market or not pick or confidence < 0.50:
+        return None
+
+    fair_odds = 1.0 / max(confidence, 1e-6)
+
+    # Get book odds for this market/pick
+    col_map = {
+        ("ML", "HOME"): "odds_ml_home",
+        ("ML", "AWAY"): "odds_ml_away",
+        ("TOTAL", "OVER"): "odds_over85",
+        ("TOTAL", "UNDER"): "odds_under85",
+        ("ITB", "HOME_OVER"): "odds_itb_home",
+        ("ITB", "AWAY_OVER"): "odds_itb_away",
+    }
+    col = col_map.get((market, pick))
+    book = float(odds.get(col, 0.0)) if col else None
+    if not book or book < settings.min_odds:
+        return None
+
+    edge = confidence * book - 1.0
+    if edge > MAX_EDGE:
+        edge = MAX_EDGE
+
+    stake = _kelly(confidence, book)
+    return Signal(
+        match_id=match_id,
+        market=market, pick=pick,
+        model_prob=confidence, fair_odds=fair_odds,
+        book_odds=float(book), edge=float(edge),
+        confidence=confidence,
+        stake_units=float(round(stake, 2)),
+        is_value=True,
+    )
+
+
 async def generate_and_broadcast(bot) -> int:
-    """Generate signals for upcoming games and broadcast new ones."""
-    predictor = Predictor()
-    if not predictor.ready:
-        # Проверяем: может быть нужно просто переобучить (данные есть, модели слетели)
-        async with SessionLocal() as session:
-            from sqlalchemy import func
-            n_finished = (await session.execute(
-                select(func.count()).select_from(Match).where(Match.status == "FINISHED")
-            )).scalar() or 0
-        if n_finished >= 200:
-            logger.warning(
-                f"Models not ready but {n_finished} finished games available — "
-                "triggering background retrain"
-            )
-            import asyncio as _aio
-            _aio.create_task(train_models(bot=bot))
-        else:
-            logger.warning(f"Models not ready, only {n_finished} finished games — need bootstrap")
-        return 0
-    df = await _load_games_df()
-    if df.empty:
-        logger.warning("generate_and_broadcast: no games in DB")
-        return 0
-    # Нормализуем utc_date в naive UTC (asyncpg может вернуть timezone-aware)
-    if hasattr(df["utc_date"].dtype, "tz") and df["utc_date"].dtype.tz is not None:
-        df["utc_date"] = df["utc_date"].dt.tz_convert("UTC").dt.tz_localize(None)
-
-    finished = df[df["status"] == "FINISHED"].copy()
-    all_upcoming = df[df["status"] != "FINISHED"].copy()
-
-    # Сигналы только для игр, начинающихся в ближайшие 5 часов
+    """Claude analyzes every upcoming game with real odds and broadcasts signals."""
     now = datetime.utcnow()
     horizon = now + timedelta(hours=5)
-    upcoming = all_upcoming[
-        (all_upcoming["utc_date"] >= now) &
-        (all_upcoming["utc_date"] <= horizon)
-    ].copy()
-    logger.info(
-        f"generate_and_broadcast: total={len(df)} finished={len(finished)} "
-        f"upcoming_all={len(all_upcoming)} in_5h_window={len(upcoming)} "
-        f"window=[{now.strftime('%H:%M')},{horizon.strftime('%H:%M')} UTC]"
-    )
-    if upcoming.empty:
-        logger.info("No games starting within 5 hours")
-        return 0
-    feats = build_inference_features(upcoming, finished)
-    if feats.empty:
-        logger.warning(
-            f"build_inference_features returned empty for {len(upcoming)} upcoming games — "
-            f"team IDs: {upcoming['home_team_id'].tolist()[:5]}"
-        )
-        return 0
-    preds = predictor.predict(feats)
 
+    # Load upcoming games in 5h window
+    async with SessionLocal() as session:
+        upcoming_matches = (await session.execute(
+            select(Match).where(
+                Match.status != "FINISHED",
+                Match.utc_date >= now,
+                Match.utc_date <= horizon,
+            ).order_by(Match.utc_date.asc())
+        )).scalars().all()
+
+        if not upcoming_matches:
+            logger.info("No games in 5h window")
+            return 0
+
+        teams_cache: dict[int, Team] = {}
+        for m in upcoming_matches:
+            for tid in (m.home_team_id, m.away_team_id):
+                if tid not in teams_cache:
+                    t = await session.get(Team, tid)
+                    if t:
+                        teams_cache[tid] = t
+
+        # Filter out already-signaled games
+        existing_ids = set((await session.execute(
+            select(SignalRow.match_id).where(
+                SignalRow.match_id.in_([m.id for m in upcoming_matches])
+            )
+        )).scalars().all())
+
+    to_analyze = [m for m in upcoming_matches if m.id not in existing_ids]
+    if not to_analyze:
+        logger.info("All games in window already have signals")
+        return 0
+
+    logger.info(
+        f"generate_and_broadcast: {len(upcoming_matches)} in window, "
+        f"{len(to_analyze)} need signals"
+    )
+
+    # Fetch odds
+    odds_map: dict[int, dict] = {}
     if settings.odds_api_key:
         odds_client = OddsApiClient(settings.odds_api_key)
         try:
-            async with SessionLocal() as session:
-                tuples = []
-                for mid in preds["match_id"].tolist():
-                    match = await session.get(Match, int(mid))
-                    if not match:
-                        continue
-                    home = await session.get(Team, match.home_team_id)
-                    away = await session.get(Team, match.away_team_id)
-                    if home and away:
-                        tuples.append((match.id, match.competition, home.name, away.name, match.utc_date))
+            tuples = []
+            for m in to_analyze:
+                ht = teams_cache.get(m.home_team_id)
+                at = teams_cache.get(m.away_team_id)
+                if ht and at:
+                    tuples.append((m.id, m.competition, ht.name, at.name, m.utc_date))
             odds_map = await fetch_odds_for_matches(odds_client, tuples)
         finally:
             await odds_client.close()
-        for col in ["odds_ml_home", "odds_ml_away", "odds_over85", "odds_under85",
-                    "odds_rl_home", "odds_rl_away", "odds_rl_away_cover", "odds_rl_home_lay",
-                    "odds_itb_home", "odds_itb_away", "odds_f5_home", "odds_f5_away"]:
-            preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
-        logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} games")
+        logger.info(f"Got odds for {len(odds_map)}/{len(to_analyze)} games")
 
-    ai_match_ids: set[int] = set()
-    ai_signals: List[Signal] = []
-    if await get_bool("ai_ensemble_enabled", False):
-        ai_signals, ai_match_ids = await _apply_ai_ensemble(preds, feats)
+    # Claude analyzes each game with odds
+    sem = asyncio.Semaphore(3)
 
-    # XGBoost сигналы только для игр без AI-выбора
-    preds_no_ai = preds[~preds["match_id"].isin(ai_match_ids)].copy()
-    preds_no_ai["_ai_applied"] = False
-    xgb_signals = generate(preds_no_ai)
-    signals = ai_signals + xgb_signals
-    new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
+    async def _analyze_one(match: Match) -> tuple[int, dict | None, dict]:
+        odds = odds_map.get(match.id, {})
+        ml_h = odds.get("odds_ml_home", 0.0)
+        ml_a = odds.get("odds_ml_away", 0.0)
+        # Skip games without minimum viable odds
+        if not ml_h or not ml_a or (ml_h < settings.min_odds and ml_a < settings.min_odds):
+            logger.debug(f"Skipping {match.id}: no valid odds (ml_h={ml_h} ml_a={ml_a})")
+            return match.id, None, odds
+
+        ht = teams_cache.get(match.home_team_id)
+        at = teams_cache.get(match.away_team_id)
+        home_name = ht.name if ht else f"Team#{match.home_team_id}"
+        away_name = at.name if at else f"Team#{match.away_team_id}"
+
+        feat_dict = {
+            "home_pitcher_name": match.home_pitcher_name,
+            "away_pitcher_name": match.away_pitcher_name,
+            "home_pitcher_era": match.home_pitcher_era,
+            "home_pitcher_whip": match.home_pitcher_whip,
+            "home_pitcher_k9": match.home_pitcher_k9,
+            "home_pitcher_bb9": match.home_pitcher_bb9,
+            "away_pitcher_era": match.away_pitcher_era,
+            "away_pitcher_whip": match.away_pitcher_whip,
+            "away_pitcher_k9": match.away_pitcher_k9,
+            "away_pitcher_bb9": match.away_pitcher_bb9,
+            "odds_ml_home": ml_h,
+            "odds_ml_away": ml_a,
+            "odds_over85": odds.get("odds_over85", 0.0),
+            "odds_under85": odds.get("odds_under85", 0.0),
+            "odds_rl_home": odds.get("odds_rl_home", 0.0),
+            "odds_rl_away": odds.get("odds_rl_away", 0.0),
+        }
+
+        # H2H + team form from DB
+        try:
+            from src.data.team_stats import get_team_context
+            ctx = await get_team_context(
+                match.home_team_id, match.away_team_id, match.season or 2026
+            )
+            feat_dict.update(ctx)
+        except Exception as e:
+            logger.debug(f"get_team_context failed for {match.id}: {e}")
+
+        # Neutral probs — Claude decides based on pitchers/odds/context
+        ml_probs = {
+            "p_home": 0.5, "p_away": 0.5,
+            "p_over85": 0.5, "p_itb_home": 0.5, "p_itb_away": 0.5,
+        }
+
+        async with sem:
+            ai = await ai_predict(
+                match_id=match.id,
+                home=home_name, away=away_name,
+                competition=match.competition or "MLB",
+                ml_probs=ml_probs,
+                features=feat_dict,
+            )
+        return match.id, ai, odds
+
+    results = await asyncio.gather(*[_analyze_one(m) for m in to_analyze])
+
+    signals: List[Signal] = []
+    ai_results_cache: dict[int, dict] = {}
+    for mid, ai, odds in results:
+        if not ai:
+            continue
+        sig = _ai_to_signal(ai, mid, odds)
+        if sig is None:
+            continue
+        signals.append(sig)
+        ai_results_cache[mid] = ai
+
+    new_rows = await _store_signals(signals)
+
+    # Attach Claude reasoning and broadcast
     sent = 0
-    ai_on = await get_bool("ai_ensemble_enabled", False)
     if new_rows and bot:
         async with SessionLocal() as session:
             for row in new_rows:
@@ -225,190 +254,44 @@ async def generate_and_broadcast(bot) -> int:
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
+
                 ai_comment = None
-                if ai_on and row.match_id in ai_match_ids:
-                    cached_ai = await session.get(AiPrediction, row.match_id)
-                    if cached_ai:
-                        try:
-                            ai_comment = json.loads(cached_ai.payload).get("reasoning")
-                        except Exception:
-                            ai_comment = None
+                ai_res = ai_results_cache.get(row.match_id)
+                if ai_res:
+                    ai_comment = ai_res.get("reasoning")
                     if ai_comment:
                         stored = await session.get(SignalRow, row.id)
                         if stored:
                             stored.commentary = ai_comment
                             await session.commit()
+
                 text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
-    logger.info(
-        f"Generated {len(new_rows)} new signals, broadcast {sent} messages "
-        f"(AI={'on' if ai_on else 'off'})"
-    )
+
+    logger.info(f"Claude generated {len(new_rows)} signals, broadcast {sent}")
     return len(new_rows)
-
-
-def _ai_to_signal(ai_result: dict, preds_row: pd.Series) -> Signal | None:
-    """Конвертирует выбор AI {market, pick, confidence} в Signal с учётом коэффициентов."""
-    from src.config import settings as cfg
-
-    market = ai_result["market"]
-    pick = ai_result["pick"]
-    confidence = float(ai_result.get("confidence", 0.0))
-    if confidence < 0.50:
-        return None
-
-    fair_odds = 1.0 / max(confidence, 1e-6)
-    book = _book_odds_for(preds_row, market, pick)
-
-    if book is not None:
-        edge = confidence * book - 1.0
-        if edge < cfg.min_edge or edge > MAX_EDGE:
-            # edge вне диапазона — всё равно публикуем как MODEL без edge
-            return Signal(
-                match_id=int(preds_row["match_id"]),
-                market=market, pick=pick,
-                model_prob=confidence, fair_odds=fair_odds,
-                book_odds=float(book), edge=max(edge, 0.0),
-                confidence=confidence, stake_units=1.0,
-                is_value=False,
-            )
-        stake = _kelly(confidence, book)
-        return Signal(
-            match_id=int(preds_row["match_id"]),
-            market=market, pick=pick,
-            model_prob=confidence, fair_odds=fair_odds,
-            book_odds=float(book), edge=float(edge),
-            confidence=confidence,
-            stake_units=float(round(stake, 2)),
-            is_value=True,
-        )
-
-    # Без коэффициентов — не публикуем ни один рынок
-    return None
-
-
-async def _apply_ai_ensemble(
-    preds: pd.DataFrame, feats: pd.DataFrame
-) -> tuple[List[Signal], set[int]]:
-    """Claude независимо выбирает рынок и направление для каждой игры.
-    Возвращает (список сигналов от AI, множество match_id где AI сработал)."""
-    import asyncio
-
-    top_n = settings.ai_ensemble_top_n
-    threshold = settings.ai_ensemble_min_prob
-
-    feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
-    preds_idx = {int(r["match_id"]): r for _, r in preds.iterrows()}
-
-    preds_copy = preds.copy()
-    preds_copy["_max_prob"] = preds_copy[["p_home", "p_away"]].max(axis=1)
-    candidates = (
-        preds_copy[preds_copy["_max_prob"] >= threshold]
-        .sort_values("_max_prob", ascending=False)
-        .head(top_n)
-    )
-
-    if candidates.empty:
-        return [], set()
-
-    async with SessionLocal() as session:
-        existing_rows = (await session.execute(
-            select(SignalRow.match_id)
-            .where(SignalRow.match_id.in_([int(m) for m in candidates["match_id"]]))
-            .distinct()
-        )).scalars().all()
-        already_signaled = {int(m) for m in existing_rows}
-        tasks = []
-        match_meta = {}
-        for _, row in candidates.iterrows():
-            mid = int(row["match_id"])
-            if mid in already_signaled:
-                continue
-            match = await session.get(Match, mid)
-            if not match:
-                continue
-            home = await session.get(Team, match.home_team_id)
-            away = await session.get(Team, match.away_team_id)
-            if not home or not away:
-                continue
-            match_meta[mid] = (home.name, away.name, match.competition, match)
-            tasks.append((mid, row))
-
-    sem = asyncio.Semaphore(3)
-
-    async def _one(mid: int, row) -> tuple[int, dict | None]:
-        async with sem:
-            ml_probs = {
-                "p_home": float(row["p_home"]),
-                "p_away": float(row["p_away"]),
-                "p_over85": float(row["p_over85"]),
-                "p_itb_home": float(row.get("p_itb_home", 0.5)),
-                "p_itb_away": float(row.get("p_itb_away", 0.5)),
-            }
-            home, away, comp, match_obj = match_meta[mid]
-            feat_dict = feats_by_id.get(mid, {})
-            feat_dict["home_pitcher_name"] = match_obj.home_pitcher_name
-            feat_dict["away_pitcher_name"] = match_obj.away_pitcher_name
-            # Передаём реальные кэфы из Odds API в AI-промпт (не из Tavily-поиска)
-            for odds_col in ("odds_ml_home", "odds_ml_away", "odds_over85",
-                             "odds_under85", "odds_rl_home", "odds_rl_away",
-                             "odds_f5_home", "odds_f5_away"):
-                if odds_col in row and pd.notna(row[odds_col]):
-                    feat_dict[odds_col] = float(row[odds_col])
-            # Добавляем H2H и форму команд из БД
-            try:
-                from src.data.team_stats import get_team_context
-                ctx = await get_team_context(
-                    match_obj.home_team_id,
-                    match_obj.away_team_id,
-                    match_obj.season or 2026,
-                )
-                feat_dict.update(ctx)
-            except Exception as _ctx_err:
-                logger.debug(f"get_team_context failed for {mid}: {_ctx_err}")
-            ai = await ai_predict(
-                match_id=mid,
-                home=home, away=away, competition=comp,
-                ml_probs=ml_probs,
-                features=feat_dict,
-            )
-            return mid, ai
-
-    results = await asyncio.gather(*[_one(mid, r) for mid, r in tasks])
-
-    ai_signals: List[Signal] = []
-    applied: set[int] = set()
-    for mid, ai in results:
-        if not ai:
-            continue
-        preds_row = preds_idx.get(mid)
-        if preds_row is None:
-            continue
-        sig = _ai_to_signal(ai, preds_row)
-        if sig is None:
-            continue
-        ai_signals.append(sig)
-        applied.add(mid)
-
-    if applied:
-        markets = [s.market for s in ai_signals]
-        logger.info(
-            f"AI ensemble: сгенерировано {len(ai_signals)} сигналов "
-            f"для {len(applied)}/{len(tasks)} игр — {markets}"
-        )
-    return ai_signals, applied
 
 
 async def daily_cycle(bot) -> None:
     logger.info("Daily cycle start")
     await refresh_upcoming(days=7)
     if settings.odds_api_key:
-        _odds_settle_client = OddsApiClient(settings.odds_api_key)
+        _settle_client = OddsApiClient(settings.odds_api_key)
         try:
-            await enrich_scores_from_odds_api(_odds_settle_client)
+            await enrich_scores_from_odds_api(_settle_client)
         finally:
-            await _odds_settle_client.close()
+            await _settle_client.close()
     await settle_pending()
-    await train_models(bot=bot)
     await generate_and_broadcast(bot)
     logger.info("Daily cycle done")
+
+
+# kept for backwards compat (admin train command)
+async def train_models(bot=None) -> None:
+    logger.info("train_models: XGBoost removed, nothing to train")
+    if bot:
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.send_message(admin_id, "ℹ️ Модели XGBoost отключены — бот работает на Claude.")
+            except Exception:
+                pass

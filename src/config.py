@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     database_url: Optional[str] = None
     min_edge: float = 0.03
     min_confidence: float = 0.55
-    min_odds: float = 1.50
+    min_odds: float = 1.90
     max_odds: float = 4.50
     total_line: float = 8.5
     rl_line: float = 1.5
