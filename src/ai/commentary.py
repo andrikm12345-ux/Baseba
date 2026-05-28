@@ -12,13 +12,13 @@ _cache: dict[tuple, str] = {}
 _lock = asyncio.Lock()
 
 
-async def call_llm(prompt: str, max_tokens: int = 900) -> Optional[str]:
+async def call_llm(prompt: str, system: str = "", max_tokens: int = 900) -> Optional[str]:
     """Call LLM (Anthropic or OpenAI-compatible proxy)."""
     try:
         if settings.llm_base_url:
-            return await _call_openai_compat(prompt, max_tokens)
+            return await _call_openai_compat(prompt, system, max_tokens)
         elif settings.anthropic_api_key:
-            return await _call_anthropic(prompt, max_tokens)
+            return await _call_anthropic(prompt, system, max_tokens)
         else:
             logger.warning("No LLM API key configured")
             return None
@@ -27,22 +27,18 @@ async def call_llm(prompt: str, max_tokens: int = 900) -> Optional[str]:
         return None
 
 
-async def call_llm_with_search(prompt: str, max_tokens: int = 1200) -> Optional[str]:
-    """Call Anthropic Claude with built-in web_search_20250305 tool.
-
-    Claude autonomously searches the web — no Tavily needed.
-    Falls back to call_llm() if web search is unavailable.
-    """
+async def call_llm_with_search(prompt: str, system: str = "", max_tokens: int = 1200) -> Optional[str]:
+    """Call Anthropic Claude with built-in web_search_20250305 tool."""
     if not settings.anthropic_api_key:
-        return await call_llm(prompt, max_tokens)
+        return await call_llm(prompt, system, max_tokens)
     try:
-        return await _call_anthropic_with_search(prompt, max_tokens)
+        return await _call_anthropic_with_search(prompt, system, max_tokens)
     except Exception as e:
         logger.warning(f"call_llm_with_search failed ({e}), falling back to call_llm")
-        return await call_llm(prompt, max_tokens)
+        return await call_llm(prompt, system, max_tokens)
 
 
-async def _call_anthropic_with_search(prompt: str, max_tokens: int) -> Optional[str]:
+async def _call_anthropic_with_search(prompt: str, system: str, max_tokens: int) -> Optional[str]:
     """Tool-use loop with Anthropic's server-side web_search_20250305 tool."""
     import anthropic
 
@@ -50,15 +46,18 @@ async def _call_anthropic_with_search(prompt: str, max_tokens: int) -> Optional[
     messages: list = [{"role": "user", "content": prompt}]
     tools = [{"type": "web_search_20250305", "name": "web_search"}]
     beta_headers = {"anthropic-beta": "web-search-2025-03-05"}
+    kwargs = dict(
+        model=settings.llm_model,
+        max_tokens=max_tokens,
+        tools=tools,
+        messages=messages,
+        extra_headers=beta_headers,
+    )
+    if system:
+        kwargs["system"] = system
 
     for _ in range(10):
-        response = await client.messages.create(
-            model=settings.llm_model,
-            max_tokens=max_tokens,
-            tools=tools,
-            messages=messages,
-            extra_headers=beta_headers,
-        )
+        response = await client.messages.create(**kwargs)
 
         text_blocks = [
             b.text
@@ -92,24 +91,32 @@ async def _call_anthropic_with_search(prompt: str, max_tokens: int) -> Optional[
     return None
 
 
-async def _call_anthropic(prompt: str, max_tokens: int) -> Optional[str]:
+async def _call_anthropic(prompt: str, system: str, max_tokens: int) -> Optional[str]:
     import anthropic
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    msg = await client.messages.create(
+    kwargs = dict(
         model=settings.llm_model,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
+    if system:
+        kwargs["system"] = system
+    msg = await client.messages.create(**kwargs)
     return msg.content[0].text if msg.content else None
 
 
-async def _call_openai_compat(prompt: str, max_tokens: int) -> Optional[str]:
+async def _call_openai_compat(prompt: str, system: str, max_tokens: int) -> Optional[str]:
     import aiohttp
     headers = {"Authorization": f"Bearer {settings.llm_api_key or settings.anthropic_api_key}"}
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
     payload = {
         "model": settings.llm_model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": max_tokens,
+        "temperature": 0,
     }
     url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
     async with aiohttp.ClientSession() as session:
