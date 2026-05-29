@@ -11,9 +11,9 @@ MSK = timezone(timedelta(hours=3))
 
 MARKET_LABELS: dict[str, str] = {
     "ML": "Мани-лайн",
-    "TOTAL": f"Тотал ({settings.total_line})",
-    "RL": f"Ран-лайн (±{settings.rl_line})",
-    "ITB": f"ИТБ ({settings.itb_line})",
+    "TOTAL": "Тотал",
+    "RL": "Ран-лайн",
+    "ITB": "ИТБ",
     "F5": "Первые 5 иннингов",
 }
 
@@ -69,18 +69,22 @@ def format_signal(
     kickoff = _msk(match.utc_date)
     market_label = MARKET_LABELS.get(signal.market, signal.market)
 
-    if signal.market == "RL":
+    ln = getattr(signal, "line", None)
+    if signal.market == "TOTAL":
+        tl = ln if ln is not None else settings.total_line
+        market_label = f"Тотал ({tl:g})"
+        pick_label = f"Тотал Б {tl:g}" if signal.pick == "OVER" else f"Тотал М {tl:g}"
+    elif signal.market == "RL":
+        rl = ln if ln is not None else settings.rl_line
+        market_label = f"Ран-лайн (±{rl:g})"
         if signal.pick == "COVER":
-            pick_label = f"{home_name} −{settings.rl_line}"
-        elif signal.pick == "LAY":
-            pick_label = f"{away_name} +{settings.rl_line}"
+            pick_label = f"{home_name} −{rl:g}"
         elif signal.pick == "AWAY_COVER":
-            pick_label = f"{away_name} −{settings.rl_line}"
+            pick_label = f"{away_name} −{rl:g}"
+        elif signal.pick == "LAY":
+            pick_label = f"{away_name} +{rl:g}"
         else:
-            pick_label = f"{home_name} +{settings.rl_line}"
-    elif signal.market == "ITB":
-        team = home_name if signal.pick == "HOME_OVER" else away_name
-        pick_label = f"{team} ТБ {settings.itb_line}"
+            pick_label = f"{home_name} +{rl:g}"
     else:
         pick_label = PICK_LABELS.get(signal.pick, signal.pick)
 

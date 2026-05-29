@@ -1211,50 +1211,40 @@ async def cmd_check_signals(msg: Message):
             except Exception as e:
                 p_home = p_away = p_over = -1.0
 
-        # Odds
+        # Odds — реальные котировки которые увидит Claude
         odds = odds_map.get(m.id) or {}
         ml_h = odds.get("odds_ml_home")
         ml_a = odds.get("odds_ml_away")
-        tot_o = odds.get("odds_over85")
-        tot_u = odds.get("odds_under85")
-
-        # Check edge
-        signals_possible = []
-        if ml_h and p_home > 0:
-            e = p_home * ml_h - 1.0
-            flag = "✅" if e >= settings.min_edge and p_home >= settings.min_confidence else "❌"
-            signals_possible.append(f"ML HOME {flag} p={p_home:.0%} @{ml_h:.2f} edge={e:+.1%}")
-        if ml_a and p_away > 0:
-            e = p_away * ml_a - 1.0
-            flag = "✅" if e >= settings.min_edge and p_away >= settings.min_confidence else "❌"
-            signals_possible.append(f"ML AWAY {flag} p={p_away:.0%} @{ml_a:.2f} edge={e:+.1%}")
-        if tot_o and p_over > 0:
-            e = p_over * tot_o - 1.0
-            flag = "✅" if e >= settings.min_edge and p_over >= settings.min_confidence else "❌"
-            signals_possible.append(f"TOT Б {flag} p={p_over:.0%} @{tot_o:.2f} edge={e:+.1%}")
-        if tot_u and p_over > 0:
-            p_u = 1.0 - p_over
-            e = p_u * tot_u - 1.0
-            flag = "✅" if e >= settings.min_edge and p_u >= settings.min_confidence else "❌"
-            signals_possible.append(f"TOT М {flag} p={p_u:.0%} @{tot_u:.2f} edge={e:+.1%}")
+        totals_lines = odds.get("totals_lines") or []
+        spread_lines = odds.get("spread_lines") or []
 
         odds_status = "📊 Кэфы есть" if odds else "⚠️ НЕТ КЭФОВ от Odds API"
-        model_status = "" if predictor.ready else "⚠️ модель не готова"
-
         block = [f"⚾ <b>{hn}–{an}</b> {game_msk} МСК {already}"]
-        block.append(f"   {odds_status} {model_status}")
-        if p_home > 0:
-            block.append(f"   🧠 P(home)={p_home:.0%} P(away)={p_away:.0%} P(over)={p_over:.0%}")
-        for s in signals_possible:
-            block.append(f"   {s}")
-        if not signals_possible and not odds:
+        block.append(f"   {odds_status}")
+        if ml_h and ml_a:
+            from src.data.odds_api import novig_two_way
+            nv = novig_two_way(ml_h, ml_a)
+            nv_txt = f" (рынок {nv[0]*100:.0f}/{nv[1]*100:.0f}%)" if nv else ""
+            block.append(f"   ML: {hn} @{ml_h:.2f} | {an} @{ml_a:.2f}{nv_txt}")
+        if totals_lines:
+            tl_txt = ", ".join(
+                f"{t['point']:g}(Б{t['over']:.2f}/М{t['under']:.2f})" for t in totals_lines
+            )
+            block.append(f"   Тоталы: {tl_txt}")
+        if spread_lines:
+            sl_txt = ", ".join(
+                f"±{s['point']:g}(дом{s['home']:.2f}/гост{s['away']:.2f})" for s in spread_lines
+            )
+            block.append(f"   Форы: {sl_txt}")
+        if not totals_lines and not spread_lines and not (ml_h and ml_a):
             block.append(f"   → Нет кэфов = нет сигнала")
-        elif not any("✅" in s for s in signals_possible):
-            block.append(f"   → edge<{settings.min_edge:.0%} или prob<{settings.min_confidence:.0%}")
 
         lines.append("\n".join(block))
 
-    lines.append(f"\n⚙️ Пороги: min_confidence={settings.min_confidence:.0%} min_edge={settings.min_edge:.0%}")
+    lines.append(
+        f"\n⚙️ Пороги: min_edge={settings.min_edge:.0%} (расхождение с рынком), "
+        f"min_odds={settings.min_odds}, conf≥56%"
+    )
 
     # Split into chunks if too long
     full_text = "\n\n".join(lines)

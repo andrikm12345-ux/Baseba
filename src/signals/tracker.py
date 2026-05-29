@@ -12,30 +12,31 @@ from src.config import settings
 from src.data.database import Match, SessionLocal, Signal
 
 
-def _did_win(market: str, pick: str, home_runs: int, away_runs: int) -> bool:
+def _did_win(market, pick, home_runs, away_runs, line=None):
+    """Returns True/False, or None for a push (stake returned).
+
+    `line` is the line the signal was actually placed at (total runs or |handicap|).
+    """
     total = home_runs + away_runs
     diff = home_runs - away_runs
     if market == "ML":
         return (home_runs > away_runs) if pick == "HOME" else (away_runs > home_runs)
-    if market == "F5":
-        # Use full game result as proxy (not perfect but acceptable until F5 scores available)
-        return (home_runs > away_runs) if pick == "HOME" else (away_runs > home_runs)
     if market == "TOTAL":
-        return (total > settings.total_line) if pick == "OVER" else (total < settings.total_line)
+        ln = line if line is not None else settings.total_line
+        if total == ln:
+            return None  # push (integer line landed exactly)
+        return (total > ln) if pick == "OVER" else (total < ln)
     if market == "RL":
+        ln = line if line is not None else settings.rl_line
         if pick == "COVER":
-            return diff > settings.rl_line
-        if pick == "LAY":
-            return diff < settings.rl_line
+            return diff > ln          # home favored -ln
         if pick == "AWAY_COVER":
-            return (-diff) > settings.rl_line
+            return (-diff) > ln        # away favored -ln
+        # legacy underdog picks
+        if pick == "LAY":
+            return diff < ln
         if pick == "HOME_LAY":
-            return (-diff) < settings.rl_line
-    if market == "ITB":
-        if pick == "HOME_OVER":
-            return home_runs > settings.itb_line
-        if pick == "AWAY_OVER":
-            return away_runs > settings.itb_line
+            return (-diff) < ln
     return False
 
 
@@ -63,13 +64,18 @@ async def settle_pending() -> int:
         for sig, match in q.all():
             if match.home_runs is None or match.away_runs is None:
                 continue
-            won = _did_win(sig.market, sig.pick, match.home_runs, match.away_runs)
-            sig.won = won
+            won = _did_win(sig.market, sig.pick, match.home_runs, match.away_runs, sig.line)
             sig.settled = True
-            if sig.book_odds and sig.book_odds > 1.0:
-                sig.profit_units = (sig.stake_units * (sig.book_odds - 1.0)) if won else -sig.stake_units
+            if won is None:
+                # push — stake returned, neutral
+                sig.won = None
+                sig.profit_units = 0.0
             else:
-                sig.profit_units = sig.stake_units if won else -sig.stake_units
+                sig.won = won
+                if sig.book_odds and sig.book_odds > 1.0:
+                    sig.profit_units = (sig.stake_units * (sig.book_odds - 1.0)) if won else -sig.stake_units
+                else:
+                    sig.profit_units = sig.stake_units if won else -sig.stake_units
             settled += 1
         await session.commit()
     if settled:
@@ -93,6 +99,8 @@ async def roi_stats(
         rows = [r for r in rows if not r.book_odds or r.book_odds <= 1.0]
     if ai_only:
         rows = [r for r in rows if getattr(r, "is_ai_ensemble", False)]
+    # Exclude pushes (won is None) — stake returned, neutral for ROI/hit-rate
+    rows = [r for r in rows if r.won is not None]
     n = len(rows)
     if n == 0:
         return RoiStats(0, 0, 0, 0, 0, 0.0, 0.0)

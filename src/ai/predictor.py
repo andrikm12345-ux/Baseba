@@ -1,4 +1,10 @@
-"""Claude AI analysis for MLB games. JSON-only output enforced via system prompt."""
+"""Claude AI analysis for MLB games.
+
+Claude sees ALL bookmaker quotes (moneyline, every total line, every run-line)
+with the market's no-vig probability for each, and picks the ONE quote with the
+largest positive divergence (his probability − market no-vig probability).
+JSON-only output enforced via system prompt.
+"""
 from __future__ import annotations
 
 import json
@@ -52,103 +58,49 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
 SYSTEM_PROMPT = (
     "Ты — профессиональный бейсбольный аналитик-квант. "
     "Отвечай ТОЛЬКО валидным JSON без markdown, без пояснений вне JSON. "
-    "Формат ответа строго: "
-    '{"market": "...", "pick": "...", "confidence": 0.XX, "reasoning": "..."}'
+    "Формат строго: "
+    '{"market":"...","pick":"...","line":X.X,"confidence":0.XX,"reasoning":"..."}'
 )
+
 
 _PROMPT = """\
 ## МАТЧ
 {home} (хозяева) vs {away} (гости) | MLB
 
-## РЕАЛЬНЫЕ КОЭФФИЦИЕНТЫ БУКМЕКЕРОВ
-Мани-лайн: {home} {ml_home} | {away} {ml_away}
-Тотал {total_line}: Б {odds_over} | М {odds_under}
-Ран-лайн (-1.5): {home} {rl_home} | {away} {rl_away}
-
-## СТАРТОВЫЕ ПИТЧЕРЫ (из официальной БД MLB)
+## СТАРТОВЫЕ ПИТЧЕРЫ (официальная БД MLB)
 {home}: {home_pitcher_name} — ERA {home_era}, WHIP {home_whip}, K/9 {home_k9}, BB/9 {home_bb9}
 {away}: {away_pitcher_name} — ERA {away_era}, WHIP {away_whip}, K/9 {away_k9}, BB/9 {away_bb9}
 
-## СТАТИСТИКА СЕЗОНА (из нашей БД)
-{home} последние 10 игр: {home_w10}/{home_g10} побед, среднее {home_avg_runs} ранов/игру
-{away} последние 10 игр: {away_w10}/{away_g10} побед, среднее {away_avg_runs} ранов/игру
-H2H в этом сезоне ({h2h_games} игр): {home} {h2h_home_wins}–{h2h_away_wins} {away}
+## ФОРМА (наша БД)
+{home}: {home_w10}/{home_g10} побед за 10 игр, {home_avg_runs} ранов/игру
+{away}: {away_w10}/{away_g10} побед за 10 игр, {away_avg_runs} ранов/игру
+H2H сезона ({h2h_games} игр): {home} {h2h_home_wins}–{h2h_away_wins} {away}
+{web_block}
+## КОТИРОВКИ БУКМЕКЕРОВ + ВЕРОЯТНОСТЬ РЫНКА (no-vig)
+Колонка «рынок%» — честная вероятность рынка БЕЗ маржи. Это твой ориентир.
 
-## ДАННЫЕ ИЗ ВЕБ-ПОИСКА
-
-### Питчеры / состав / травмы:
-{web_pitchers}
-
-### Погода / стадион:
-{web_weather}
+{quotes_table}
 
 ## ПРАВИЛА АНАЛИЗА
+- Питчеры — главный фактор. ERA diff > 0.75 сильный сигнал. ERA < 3.50 элита, > 4.50 слабый. WHIP < 1.20 доминирует, > 1.40 уязвим.
+- Тотал: оба ERA < 3.50 → к UNDER; хотя бы один > 4.50 → к OVER. Coors Field +1.5, Petco −1.0. Ветер >15 mph к центру → выше.
+- ML/Фора: явное преимущество питчера → его команда.
 
-**Питчеры — главный фактор.**
-ERA diff > 0.75 — сильный сигнал. ERA < 3.50 элита, > 4.50 слабый.
-WHIP < 1.20 — доминирующий. WHIP > 1.40 — уязвим.
+## ГЛАВНОЕ ПРАВИЛО ВЫБОРА
+1. Для КАЖДОЙ котировки выше оцени свою вероятность исхода.
+2. Посчитай расхождение = (твоя вероятность − рынок%).
+3. Выбери ОДНУ котировку с МАКСИМАЛЬНЫМ ПОЛОЖИТЕЛЬНЫМ расхождением.
+4. Ставь только если: расхождение положительное, кэф ≥ 1.9, твоя уверенность ≥ 0.56.
+5. Если нигде нет реального расхождения с рынком — верни confidence 0.50 (пропуск).
 
-**Тотал.**
-Оба питчера ERA < 3.50 → UNDER. Хотя бы один ERA > 4.50 → OVER.
-Coors Field (Колорадо) +1.5 рана к тоталу. Petco Park (Сан-Диего) -1.0.
-Ветер > 15 mph к центру → тотал вверх. Дождь/холод → тотал вниз.
+## ВЫХОД — ТОЛЬКО JSON
+{{"market":"TOTAL","pick":"OVER","line":9.0,"confidence":0.62,"reasoning":"оба стартера ERA>4.5, рынок недооценивает тотал"}}
 
-**ML.**
-ERA diff > 0.75 в пользу одного питчера — ставить на его команду.
-
-**ПРАВИЛО ПРОПУСКА.** Если нет явного преимущества — верни confidence 0.50 и НЕ СТАВЬ.
-Минимальный confidence для сигнала: 0.56.
-
-## ВЫХОДНОЙ ФОРМАТ — ТОЛЬКО JSON
-
-Выбери ОДНУ лучшую ставку:
-
-{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "Chandler ERA 4.60 против Taillon ERA 5.20 — оба слабые стартеры, ожидаем высокий тотал"}}
-
-market: "ML" | "TOTAL"
-pick для ML: "HOME" | "AWAY"
-pick для TOTAL: "OVER" | "UNDER"
-confidence: 0.50–0.90 (если < 0.56 — не ставим, верни 0.50)
-reasoning: 2–3 предложения на русском, конкретные факты\
-"""
-
-_PROMPT_NATIVE = """\
-## МАТЧ
-{home} (хозяева) vs {away} (гости) | MLB
-
-## РЕАЛЬНЫЕ КОЭФФИЦИЕНТЫ БУКМЕКЕРОВ
-Мани-лайн: {home} {ml_home} | {away} {ml_away}
-Тотал {total_line}: Б {odds_over} | М {odds_under}
-
-## СТАРТОВЫЕ ПИТЧЕРЫ (из официальной БД MLB)
-{home}: {home_pitcher_name} — ERA {home_era}, WHIP {home_whip}
-{away}: {away_pitcher_name} — ERA {away_era}, WHIP {away_whip}
-
-## ЧТО ИСКАТЬ В ИНТЕРНЕТЕ
-1. Актуальные ERA, WHIP, последние 3 выхода каждого питчера
-2. Травмы ключевых хиттеров (IL/DL)
-3. Усталость буллпена (3+ игры подряд)
-4. Погода: ветер (направление, скорость), температура, осадки
-
-## ПРАВИЛА АНАЛИЗА
-
-**Питчеры — главный фактор.**
-ERA diff > 0.75 — сильный сигнал. ERA < 3.50 элита, > 4.50 слабый.
-
-**Тотал.**
-Оба ERA < 3.50 → UNDER. Хотя бы один ERA > 4.50 → OVER.
-Coors Field +1.5. Petco -1.0. Ветер > 15 mph к центру → тотал вверх.
-
-**ПРАВИЛО ПРОПУСКА.** Нет явного преимущества → confidence 0.50, не ставим.
-
-## ВЫХОДНОЙ ФОРМАТ — ТОЛЬКО JSON
-
-{{"market": "TOTAL", "pick": "UNDER", "confidence": 0.63, "reasoning": "2-3 предложения"}}
-
-market: "ML" | "TOTAL"
-pick для ML: "HOME" | "AWAY"
-pick для TOTAL: "OVER" | "UNDER"
-confidence: 0.50–0.90\
+market: "ML" | "TOTAL" | "RL"
+pick: ML→"HOME"|"AWAY"; TOTAL→"OVER"|"UNDER"; RL→"COVER"(хозяева −линия)|"AWAY_COVER"(гости −линия)
+line: для TOTAL и RL — точная линия из таблицы; для ML — null
+confidence: 0.50–0.90
+reasoning: 2–3 предложения на русском, конкретика\
 """
 
 
@@ -160,6 +112,82 @@ def _fmt(v, fmt=".2f") -> str:
         return "н/д"
 
 
+def _pct(p) -> str:
+    try:
+        return f"{float(p)*100:.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _build_quotes_table(home: str, away: str, features: dict) -> str:
+    """Render every available quote (ML, all totals, all run lines) with no-vig %."""
+    from src.data.odds_api import novig_two_way
+
+    lines: list[str] = []
+
+    # Moneyline
+    ml_h = features.get("odds_ml_home", 0.0)
+    ml_a = features.get("odds_ml_away", 0.0)
+    nv = novig_two_way(ml_h, ml_a)
+    if nv:
+        lines.append("МАНИ-ЛАЙН (ML):")
+        lines.append(f"  {home}: кэф {_fmt(ml_h)} | рынок {_pct(nv[0])}")
+        lines.append(f"  {away}: кэф {_fmt(ml_a)} | рынок {_pct(nv[1])}")
+
+    # Totals
+    totals = features.get("totals_lines") or []
+    if totals:
+        lines.append("ТОТАЛ (по линиям):")
+        for t in totals:
+            lines.append(
+                f"  Линия {t['point']}: "
+                f"Б кэф {_fmt(t['over'])} (рынок {_pct(t.get('over_novig'))}) | "
+                f"М кэф {_fmt(t['under'])} (рынок {_pct(t.get('under_novig'))})"
+            )
+
+    # Run lines (spreads)
+    spreads = features.get("spread_lines") or []
+    if spreads:
+        lines.append("ФОРА / РАН-ЛАЙН (по линиям, −линия = фаворит даёт фору):")
+        for s in spreads:
+            lines.append(
+                f"  Линия {s['point']}: "
+                f"{home} −{s['point']} кэф {_fmt(s['home'])} (рынок {_pct(s.get('home_novig'))}) | "
+                f"{away} −{s['point']} кэф {_fmt(s['away'])} (рынок {_pct(s.get('away_novig'))})"
+            )
+
+    return "\n".join(lines) if lines else "(котировок нет)"
+
+
+async def _build_web_block(home: str, away: str) -> str:
+    """Tavily searches for pitchers/weather (proxy mode only)."""
+    from src.data.web_search import tavily_search
+    import asyncio
+
+    web_pitchers, web_weather = await asyncio.gather(
+        tavily_search(f"{home} vs {away} starting pitcher ERA WHIP lineup injury MLB today", days=3),
+        tavily_search(f"MLB {home} {away} weather wind temperature stadium", days=2),
+    )
+
+    def _fmt_web(results: list, max_items: int = 4) -> str:
+        if not results:
+            return "(данных нет)"
+        out = []
+        for r in results[:max_items]:
+            title = r.get("title", "").strip()
+            content = r.get("content", "").strip()
+            out.append(f"• {title}: {content[:300]}")
+        return "\n".join(out)
+
+    return (
+        "\n## ВЕБ-ПОИСК\n"
+        "### Питчеры / состав / травмы:\n"
+        f"{_fmt_web(web_pitchers)}\n\n"
+        "### Погода / стадион:\n"
+        f"{_fmt_web(web_weather)}\n"
+    )
+
+
 def _parse_json_strict(raw: str) -> Optional[dict]:
     if not raw:
         return None
@@ -168,14 +196,12 @@ def _parse_json_strict(raw: str) -> Optional[dict]:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         pass
-    # Strip markdown code blocks
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    # Find first JSON object
     m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", raw, re.DOTALL)
     if m:
         try:
@@ -188,6 +214,7 @@ def _parse_json_strict(raw: str) -> Optional[dict]:
 _VALID_PICKS = {
     "ML": {"HOME", "AWAY"},
     "TOTAL": {"OVER", "UNDER"},
+    "RL": {"COVER", "AWAY_COVER"},
 }
 
 
@@ -197,44 +224,26 @@ def _validate_pick(d: dict) -> bool:
     market = d.get("market")
     pick = d.get("pick")
     confidence = d.get("confidence")
-    if market not in _VALID_PICKS:
-        return False
-    if pick not in _VALID_PICKS[market]:
+    if market not in _VALID_PICKS or pick not in _VALID_PICKS[market]:
         return False
     if not isinstance(confidence, (int, float)):
         return False
+    # line: required (number) for TOTAL/RL, ignored for ML
+    if market in ("TOTAL", "RL"):
+        line = d.get("line")
+        if not isinstance(line, (int, float)):
+            return False
+        d["line"] = float(line)
+    else:
+        d["line"] = None
     d["confidence"] = max(0.50, min(1.0, float(confidence)))
     return True
 
 
-async def _build_proxy_prompt(home: str, away: str, cfg, features: dict) -> str:
-    from src.data.web_search import tavily_search
-    import asyncio
-
-    web_pitchers, web_weather = await asyncio.gather(
-        tavily_search(f"{home} vs {away} starting pitcher ERA WHIP lineup injury MLB today", days=3),
-        tavily_search(f"MLB {home} {away} weather wind temperature stadium", days=2),
-    )
-
-    def _format_web(results: list, max_items: int = 4) -> str:
-        if not results:
-            return "(данных нет)"
-        lines = []
-        for r in results[:max_items]:
-            title = r.get("title", "").strip()
-            content = r.get("content", "").strip()
-            lines.append(f"• {title}: {content[:300]}")
-        return "\n".join(lines)
-
+async def _build_prompt(home: str, away: str, features: dict, web: bool) -> str:
+    web_block = await _build_web_block(home, away) if web else "\n"
     return _PROMPT.format(
         home=home, away=away,
-        total_line=cfg.total_line,
-        ml_home=_fmt(features.get("odds_ml_home")),
-        ml_away=_fmt(features.get("odds_ml_away")),
-        odds_over=_fmt(features.get("odds_over85")),
-        odds_under=_fmt(features.get("odds_under85")),
-        rl_home=_fmt(features.get("odds_rl_home")),
-        rl_away=_fmt(features.get("odds_rl_away")),
         home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
         home_era=_fmt(features.get("home_pitcher_era")),
         home_whip=_fmt(features.get("home_pitcher_whip")),
@@ -254,8 +263,8 @@ async def _build_proxy_prompt(home: str, away: str, cfg, features: dict) -> str:
         h2h_games=features.get("h2h_games", 0),
         h2h_home_wins=features.get("h2h_home_wins", 0),
         h2h_away_wins=features.get("h2h_away_wins", 0),
-        web_pitchers=_format_web(web_pitchers),
-        web_weather=_format_web(web_weather),
+        web_block=web_block,
+        quotes_table=_build_quotes_table(home, away, features),
     )
 
 
@@ -268,14 +277,13 @@ async def ai_predict(
     ml_probs: dict,
     features: dict,
 ) -> Optional[dict]:
-    """Returns {market, pick, confidence, reasoning} or None."""
+    """Returns {market, pick, line, confidence, reasoning} or None."""
     from src.config import settings as cfg
 
     now = time.time()
     cached = _cache.get(match_id)
-    if cached and now - cached[0] < _CACHE_TTL_SEC:
-        if _validate_pick(cached[1]):
-            return cached[1]
+    if cached and now - cached[0] < _CACHE_TTL_SEC and _validate_pick(cached[1]):
+        return cached[1]
 
     db_cached = await _db_cache_get(match_id)
     if db_cached is not None and _validate_pick(db_cached):
@@ -283,25 +291,12 @@ async def ai_predict(
         return db_cached
 
     if cfg.llm_base_url:
-        prompt = await _build_proxy_prompt(home, away, cfg, features)
-        raw = await call_llm(prompt, system=SYSTEM_PROMPT, max_tokens=600)
+        prompt = await _build_prompt(home, away, features, web=True)
+        raw = await call_llm(prompt, system=SYSTEM_PROMPT, max_tokens=700)
         mode = "proxy+tavily"
     else:
-        prompt = _PROMPT_NATIVE.format(
-            home=home, away=away,
-            total_line=cfg.total_line,
-            ml_home=_fmt(features.get("odds_ml_home")),
-            ml_away=_fmt(features.get("odds_ml_away")),
-            odds_over=_fmt(features.get("odds_over85")),
-            odds_under=_fmt(features.get("odds_under85")),
-            home_pitcher_name=features.get("home_pitcher_name") or "неизвестен",
-            home_era=_fmt(features.get("home_pitcher_era")),
-            home_whip=_fmt(features.get("home_pitcher_whip")),
-            away_pitcher_name=features.get("away_pitcher_name") or "неизвестен",
-            away_era=_fmt(features.get("away_pitcher_era")),
-            away_whip=_fmt(features.get("away_pitcher_whip")),
-        )
-        raw = await call_llm_with_search(prompt, system=SYSTEM_PROMPT, max_tokens=800)
+        prompt = await _build_prompt(home, away, features, web=False)
+        raw = await call_llm_with_search(prompt, system=SYSTEM_PROMPT, max_tokens=900)
         mode = "anthropic+websearch"
 
     if not raw:
@@ -313,7 +308,6 @@ async def ai_predict(
         logger.warning(f"ai_predict({match_id}): invalid JSON [{mode}]: {raw[:300]}")
         return None
 
-    # Enforce min confidence threshold
     if parsed["confidence"] < 0.56:
         logger.info(f"ai_predict({match_id}): confidence {parsed['confidence']:.2f} < 0.56 — skip")
         return None
@@ -322,6 +316,7 @@ async def ai_predict(
     await _db_cache_put(match_id, parsed)
     logger.info(
         f"ai_predict({match_id}) {home} vs {away} [{mode}]: "
-        f"{parsed['market']} {parsed['pick']} conf={parsed['confidence']:.2f}"
+        f"{parsed['market']} {parsed['pick']} line={parsed.get('line')} "
+        f"conf={parsed['confidence']:.2f}"
     )
     return parsed

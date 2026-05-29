@@ -55,6 +55,7 @@ async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
                 continue
             row = SignalRow(
                 match_id=s.match_id, market=s.market, pick=s.pick,
+                line=s.line,
                 is_ai_ensemble=True,
                 is_value=s.is_value,
                 model_prob=s.model_prob, fair_odds=s.fair_odds,
@@ -67,43 +68,85 @@ async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
     return stored
 
 
+def _find_line(lines: list, point) -> dict | None:
+    """Find the quote entry matching the line Claude picked (tolerance 0.01)."""
+    try:
+        pt = float(point)
+    except (TypeError, ValueError):
+        return None
+    for entry in lines or []:
+        if abs(entry.get("point", -999) - pt) < 0.01:
+            return entry
+    return None
+
+
 def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
-    """Convert Claude output to Signal using real book odds."""
+    """Convert Claude output to Signal.
+
+    Edge is measured vs the market's no-vig probability (real divergence),
+    not vs the raw confidence. Publishes only at odds >= min_odds and
+    edge >= min_edge.
+    """
     market = ai_result.get("market")
     pick = ai_result.get("pick")
     confidence = float(ai_result.get("confidence", 0.0))
-    if not market or not pick or confidence < 0.50:
+    line = ai_result.get("line")
+    if not market or not pick or confidence < 0.56:
         return None
 
-    fair_odds = 1.0 / max(confidence, 1e-6)
+    book: float = 0.0
+    novig: float | None = None
+    sig_line: float | None = None
 
-    # Get book odds for this market/pick
-    col_map = {
-        ("ML", "HOME"): "odds_ml_home",
-        ("ML", "AWAY"): "odds_ml_away",
-        ("TOTAL", "OVER"): "odds_over85",
-        ("TOTAL", "UNDER"): "odds_under85",
-        ("ITB", "HOME_OVER"): "odds_itb_home",
-        ("ITB", "AWAY_OVER"): "odds_itb_away",
-    }
-    col = col_map.get((market, pick))
-    book = float(odds.get(col, 0.0)) if col else None
+    if market == "ML":
+        book = float(odds.get("odds_ml_home" if pick == "HOME" else "odds_ml_away", 0.0))
+        from src.data.odds_api import novig_two_way
+        nv = novig_two_way(odds.get("odds_ml_home"), odds.get("odds_ml_away"))
+        if nv:
+            novig = nv[0] if pick == "HOME" else nv[1]
+
+    elif market == "TOTAL":
+        entry = _find_line(odds.get("totals_lines"), line)
+        if entry is None:
+            return None
+        sig_line = entry["point"]
+        if pick == "OVER":
+            book, novig = entry["over"], entry.get("over_novig")
+        else:
+            book, novig = entry["under"], entry.get("under_novig")
+
+    elif market == "RL":
+        entry = _find_line(odds.get("spread_lines"), line)
+        if entry is None:
+            return None
+        sig_line = entry["point"]
+        if pick == "COVER":
+            book, novig = entry["home"], entry.get("home_novig")
+        else:  # AWAY_COVER
+            book, novig = entry["away"], entry.get("away_novig")
+
     if not book or book < settings.min_odds:
         return None
 
-    edge = confidence * book - 1.0
-    if edge > MAX_EDGE:
-        edge = MAX_EDGE
+    # Real edge = Claude's probability − market no-vig probability
+    if novig is not None:
+        edge = confidence - float(novig)
+    else:
+        edge = confidence * book - 1.0  # fallback if no-vig unavailable
+    if edge < settings.min_edge:
+        return None
+    edge = min(edge, MAX_EDGE)
 
     stake = _kelly(confidence, book)
     return Signal(
         match_id=match_id,
         market=market, pick=pick,
-        model_prob=confidence, fair_odds=fair_odds,
+        model_prob=confidence, fair_odds=1.0 / max(confidence, 1e-6),
         book_odds=float(book), edge=float(edge),
         confidence=confidence,
         stake_units=float(round(stake, 2)),
         is_value=True,
+        line=sig_line,
     )
 
 
@@ -197,10 +240,8 @@ async def generate_and_broadcast(bot) -> int:
             "away_pitcher_bb9": match.away_pitcher_bb9,
             "odds_ml_home": ml_h,
             "odds_ml_away": ml_a,
-            "odds_over85": odds.get("odds_over85", 0.0),
-            "odds_under85": odds.get("odds_under85", 0.0),
-            "odds_rl_home": odds.get("odds_rl_home", 0.0),
-            "odds_rl_away": odds.get("odds_rl_away", 0.0),
+            "totals_lines": odds.get("totals_lines", []),
+            "spread_lines": odds.get("spread_lines", []),
         }
 
         # H2H + team form from DB

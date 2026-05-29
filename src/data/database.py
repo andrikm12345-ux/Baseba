@@ -89,7 +89,8 @@ class Signal(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), index=True)
     market: Mapped[str] = mapped_column(String(32))   # ML, TOTAL, RL
-    pick: Mapped[str] = mapped_column(String(16))      # HOME/AWAY, OVER/UNDER, COVER/LAY
+    pick: Mapped[str] = mapped_column(String(16))      # HOME/AWAY, OVER/UNDER, COVER/AWAY_COVER
+    line: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # total/spread line; None for ML
     model_prob: Mapped[float] = mapped_column(Float)
     fair_odds: Mapped[float] = mapped_column(Float)
     book_odds: Mapped[float] = mapped_column(Float)
@@ -168,6 +169,10 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS commentary TEXT"))
         except Exception as e:
             logger.warning(f"commentary column migration skipped: {e}")
+        try:
+            await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS line FLOAT"))
+        except Exception as e:
+            logger.warning(f"line column migration skipped: {e}")
         try:
             await conn.execute(text(
                 "ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_ai_ensemble BOOLEAN DEFAULT FALSE"

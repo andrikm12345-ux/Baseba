@@ -22,6 +22,8 @@ SPORT = "baseball_mlb"
 # us = FanDuel/DraftKings/BetMGM; eu = Pinnacle (sharpest lines)
 REGIONS = "us,eu"
 MARKETS = "h2h,totals,spreads"
+# Best-effort extra lines (may be unavailable on free tier → silently skipped)
+ALT_MARKETS = "alternate_totals,alternate_spreads"
 
 CACHE_TTL = 7200.0  # 2 hours
 
@@ -158,6 +160,40 @@ class OddsApiClient:
             logger.warning(f"the-odds-api scores fetch failed: {e}")
             return []
 
+    async def _merge_alt_markets(self, events: List[Dict[str, Any]]) -> None:
+        """Best-effort: fetch alternate_totals/spreads and merge into events.
+
+        Free tier may return 422 — if so we silently skip (main odds still work).
+        """
+        params = {
+            "apiKey": self.api_key,
+            "regions": REGIONS,
+            "markets": ALT_MARKETS,
+            "dateFormat": "iso",
+            "oddsFormat": "decimal",
+        }
+        try:
+            session = await self._get_session()
+            url = f"{BASE_URL}/sports/{SPORT}/odds"
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status >= 400:
+                    logger.info(f"the-odds-api alt markets unavailable ({r.status}) — using main lines only")
+                    return
+                alt = await r.json()
+                if not isinstance(alt, list):
+                    return
+                by_id = {e.get("id"): e for e in events}
+                merged = 0
+                for ae in alt:
+                    me = by_id.get(ae.get("id"))
+                    if me is None:
+                        continue
+                    me.setdefault("bookmakers", []).extend(ae.get("bookmakers", []))
+                    merged += 1
+                logger.info(f"the-odds-api: merged alt lines into {merged} events")
+        except Exception as e:
+            logger.debug(f"alt markets merge skipped: {e}")
+
     async def fetch_mlb_odds(self) -> List[Dict[str, Any]]:
         """Fetch all upcoming MLB games with ML/totals/spreads odds.
 
@@ -221,6 +257,8 @@ class OddsApiClient:
                     logger.warning(f"the-odds-api: unexpected response type {type(events)}")
                     return []
                 logger.info(f"the-odds-api: fetched {len(events)} MLB events")
+                # Best-effort: enrich with alternate total/spread lines
+                await self._merge_alt_markets(events)
                 _cache = (time.monotonic(), events)
                 # Persist to DB so cache survives container restarts
                 try:
@@ -246,41 +284,53 @@ def _as_float(x: Any) -> Optional[float]:
         return None
 
 
-def extract_odds_v4(event: Dict[str, Any]) -> Dict[str, float]:
-    """Extract ML / TOTAL / RL odds from a the-odds-api.com v4 event."""
+def novig_two_way(odds_a: Optional[float], odds_b: Optional[float]) -> Optional[tuple]:
+    """Remove bookmaker margin from a two-way market.
+
+    Returns (prob_a, prob_b) summing to 1.0, or None if odds invalid.
+    """
+    try:
+        a, b = float(odds_a), float(odds_b)
+    except (TypeError, ValueError):
+        return None
+    if a <= 1.0 or b <= 1.0:
+        return None
+    ia, ib = 1.0 / a, 1.0 / b
+    s = ia + ib
+    if s <= 0:
+        return None
+    return ia / s, ib / s
+
+
+def _best(lst: List[float]) -> float:
+    return max(lst) if lst else 0.0
+
+
+def extract_odds_v4(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract ML + ALL total lines + ALL spread (run line) lines.
+
+    Returns dict with:
+      - odds_ml_home / odds_ml_away      (moneyline scalars)
+      - totals_lines: [{point, over, under, n_books}]   (all lines, best price)
+      - spread_lines: [{point, home, away, n_books}]    (point = |handicap|)
+      - total_line / odds_over85 / odds_under85          (consensus line, back-compat)
+    """
     home_team = event.get("home_team", "")
     away_team = event.get("away_team", "")
-    total_line = settings.total_line
-    rl_line = settings.rl_line
 
     ml_home: List[float] = []
     ml_away: List[float] = []
-    over_list: List[float] = []
-    under_list: List[float] = []
-    rl_home: List[float] = []   # home -1.5 (home favored)
-    rl_away: List[float] = []   # away +1.5
-    rl_away_c: List[float] = [] # away -1.5 (away favored)
-    rl_home_l: List[float] = [] # home +1.5
-    f5_home: List[float] = []   # first 5 innings home
-    f5_away: List[float] = []   # first 5 innings away
+    # point -> {"over": [...], "under": [...]}
+    totals_map: Dict[float, Dict[str, List[float]]] = {}
+    # abs(point) -> prices for favorite-cover (-ln) and underdog (+ln) on each side
+    spreads_map: Dict[float, Dict[str, List[float]]] = {}
 
     for bk in event.get("bookmakers", []):
         for market in bk.get("markets", []):
             key = market.get("key", "")
             outcomes = market.get("outcomes", [])
 
-            if key == "h2h_1st_5_innings":
-                for o in outcomes:
-                    price = _as_float(o.get("price"))
-                    if price is None:
-                        continue
-                    name = o.get("name", "")
-                    if _canonical(name) == _canonical(home_team):
-                        f5_home.append(price)
-                    elif _canonical(name) == _canonical(away_team):
-                        f5_away.append(price)
-
-            elif key == "h2h":
+            if key == "h2h":
                 for o in outcomes:
                     price = _as_float(o.get("price"))
                     if price is None:
@@ -291,65 +341,91 @@ def extract_odds_v4(event: Dict[str, Any]) -> Dict[str, float]:
                     elif _canonical(name) == _canonical(away_team):
                         ml_away.append(price)
 
-            elif key == "totals":
+            elif key in ("totals", "alternate_totals"):
                 for o in outcomes:
                     price = _as_float(o.get("price"))
                     if price is None:
                         continue
-                    point = o.get("point")
                     try:
-                        pt = float(point) if point is not None else None
+                        pt = float(o.get("point"))
                     except (TypeError, ValueError):
-                        pt = None
-                    if pt is not None and abs(pt - total_line) > 0.3:
                         continue
-                    name = o.get("name", "").lower()
-                    if name == "over":
-                        over_list.append(price)
-                    elif name == "under":
-                        under_list.append(price)
+                    side = o.get("name", "").lower()
+                    if side not in ("over", "under"):
+                        continue
+                    totals_map.setdefault(pt, {"over": [], "under": []})[side].append(price)
 
-            elif key == "spreads":
+            elif key in ("spreads", "alternate_spreads"):
                 for o in outcomes:
                     price = _as_float(o.get("price"))
                     if price is None:
                         continue
-                    point = o.get("point")
                     try:
-                        pt = float(point) if point is not None else None
+                        pt = float(o.get("point"))
                     except (TypeError, ValueError):
-                        pt = None
-                    if pt is None or abs(abs(pt) - rl_line) > 0.3:
                         continue
-                    name = o.get("name", "")
-                    can = _canonical(name)
-                    if can == _canonical(home_team):
-                        if pt < 0:
-                            rl_home.append(price)   # home -1.5
-                        else:
-                            rl_home_l.append(price)  # home +1.5
-                    elif can == _canonical(away_team):
-                        if pt < 0:
-                            rl_away_c.append(price)  # away -1.5
-                        else:
-                            rl_away.append(price)    # away +1.5
+                    can = _canonical(o.get("name", ""))
+                    absln = abs(pt)
+                    bucket = spreads_map.setdefault(
+                        absln, {"home_fav": [], "away_dog": [], "away_fav": [], "home_dog": []}
+                    )
+                    is_home = can == _canonical(home_team)
+                    is_away = can == _canonical(away_team)
+                    if pt < 0:  # covering the favorite handicap
+                        if is_home:
+                            bucket["home_fav"].append(price)   # home -absln
+                        elif is_away:
+                            bucket["away_fav"].append(price)   # away -absln
+                    elif pt > 0:  # underdog +handicap (complement)
+                        if is_home:
+                            bucket["home_dog"].append(price)   # home +absln
+                        elif is_away:
+                            bucket["away_dog"].append(price)   # away +absln
 
-    def _best(lst: List[float]) -> float:
-        return max(lst) if lst else 0.0
+    # Build totals lines (need both over+under present) + no-vig probs
+    totals_lines = []
+    for pt, sides in sorted(totals_map.items()):
+        over, under = _best(sides["over"]), _best(sides["under"])
+        if over > 1.0 and under > 1.0:
+            nv = novig_two_way(over, under)
+            totals_lines.append({
+                "point": pt, "over": over, "under": under,
+                "over_novig": round(nv[0], 4) if nv else None,
+                "under_novig": round(nv[1], 4) if nv else None,
+                "n_books": min(len(sides["over"]), len(sides["under"])),
+            })
+
+    # Build spread (run line) lines + no-vig (favorite-cover vs underdog complement)
+    spread_lines = []
+    for pt, sides in sorted(spreads_map.items()):
+        home, away = _best(sides["home_fav"]), _best(sides["away_fav"])
+        if home <= 1.0 and away <= 1.0:
+            continue
+        # home covers -pt  ↔ complement away +pt ; away covers -pt ↔ complement home +pt
+        nv_home = novig_two_way(home, _best(sides["away_dog"]))
+        nv_away = novig_two_way(away, _best(sides["home_dog"]))
+        spread_lines.append({
+            "point": pt,
+            "home": home, "away": away,
+            "home_novig": round(nv_home[0], 4) if nv_home else None,
+            "away_novig": round(nv_away[0], 4) if nv_away else None,
+            "n_books": max(len(sides["home_fav"]), len(sides["away_fav"])),
+        })
+
+    # Consensus total line = most-quoted (back-compat scalars)
+    consensus = max(totals_lines, key=lambda x: x["n_books"], default=None)
 
     return {
         "odds_ml_home": _best(ml_home),
         "odds_ml_away": _best(ml_away),
-        "odds_over85": _best(over_list),
-        "odds_under85": _best(under_list),
-        "odds_rl_home": _best(rl_home),
-        "odds_rl_away": _best(rl_away),
-        "odds_rl_away_cover": _best(rl_away_c),
-        "odds_rl_home_lay": _best(rl_home_l),
-        "odds_itb_home": 0.0,
-        "odds_itb_away": 0.0,
-        "odds_f5_home": _best(f5_home),
-        "odds_f5_away": _best(f5_away),
+        "totals_lines": totals_lines,
+        "spread_lines": spread_lines,
+        "total_line": consensus["point"] if consensus else 0.0,
+        "odds_over85": consensus["over"] if consensus else 0.0,
+        "odds_under85": consensus["under"] if consensus else 0.0,
+        # back-compat keys (consensus run line ±1.5 if present)
+        "odds_rl_home": next((s["home"] for s in spread_lines if abs(s["point"] - 1.5) < 0.01), 0.0),
+        "odds_rl_away_cover": next((s["away"] for s in spread_lines if abs(s["point"] - 1.5) < 0.01), 0.0),
     }
 
 
@@ -437,7 +513,12 @@ async def fetch_odds_for_matches(
                 f"over={odds['odds_over85']:.2f} under={odds['odds_under85']:.2f}"
             )
 
-        if any(v > 0 for v in odds.values()):
+        has_any = (
+            odds.get("odds_ml_home", 0) > 1.0
+            or odds.get("totals_lines")
+            or odds.get("spread_lines")
+        )
+        if has_any:
             out[match_id] = odds
 
     return out

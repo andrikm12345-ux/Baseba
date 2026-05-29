@@ -35,6 +35,7 @@ class Signal:
     confidence: float
     stake_units: float
     is_value: bool
+    line: Optional[float] = None  # total/spread line; None for ML
 
 
 def _kelly(p: float, odds: float, fraction: float = 0.25, cap: float = 2.0) -> float:
@@ -60,10 +61,8 @@ def _book_odds_for(row: pd.Series, market: str, pick: str) -> Optional[float]:
         ("ML", "AWAY"): "odds_ml_away",
         ("TOTAL", "OVER"): "odds_over85",
         ("TOTAL", "UNDER"): "odds_under85",
-        ("ITB", "HOME_OVER"): "odds_itb_home",
-        ("ITB", "AWAY_OVER"): "odds_itb_away",
-        ("F5", "HOME"): "odds_f5_home",
-        ("F5", "AWAY"): "odds_f5_away",
+        ("RL", "COVER"): "odds_rl_home",
+        ("RL", "AWAY_COVER"): "odds_rl_away_cover",
     }.get((market, pick))
     if col and col in row and pd.notna(row[col]) and row[col] > 1.0:
         return float(row[col])
