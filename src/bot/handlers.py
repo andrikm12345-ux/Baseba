@@ -195,10 +195,11 @@ async def cmd_today(msg: Message):
 @router.message(Command("stats"))
 @router.message(lambda m: m.text == "📊 Статистика")
 async def cmd_stats(msg: Message):
-    model_s = await roi_stats(last_n=200, only_value=False)   # 📊 MODEL (без коэффа БК)
-    value_s = await roi_stats(last_n=200, only_value=True)    # 🔥 VALUE (с edge)
-    ai_s = await roi_stats(last_n=200, ai_only=True, only_value=None)  # 🤖 AI ансамбль
-    text = format_roi_stats(model_s, value_s, ai_s)
+    overall = await roi_stats(last_n=500)
+    ml = await roi_stats(last_n=500, market="ML")
+    total = await roi_stats(last_n=500, market="TOTAL")
+    rl = await roi_stats(last_n=500, market="RL")
+    text = format_roi_stats(overall, ml, total, rl)
     await msg.answer(text, parse_mode="HTML")
 
 

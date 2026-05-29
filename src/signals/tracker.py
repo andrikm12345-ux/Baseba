@@ -80,20 +80,16 @@ async def settle_pending() -> int:
 
 async def roi_stats(
     last_n: int | None = None,
-    only_value: bool | None = True,
-    ai_only: bool | None = None,
+    market: str | None = None,
 ) -> RoiStats:
+    """ROI over settled signals, optionally filtered to one market (ML/TOTAL/RL)."""
     async with SessionLocal() as session:
         q = select(Signal).where(Signal.settled.is_(True)).order_by(Signal.created_at.desc())
         if last_n:
             q = q.limit(last_n)
         rows: List[Signal] = list((await session.execute(q)).scalars())
-    if only_value is True:
-        rows = [r for r in rows if r.book_odds and r.book_odds > 1.0]
-    elif only_value is False:
-        rows = [r for r in rows if not r.book_odds or r.book_odds <= 1.0]
-    if ai_only:
-        rows = [r for r in rows if getattr(r, "is_ai_ensemble", False)]
+    if market:
+        rows = [r for r in rows if r.market == market]
     # Exclude pushes (won is None) — stake returned, neutral for ROI/hit-rate
     rows = [r for r in rows if r.won is not None]
     n = len(rows)

@@ -109,32 +109,32 @@ def format_signal(
     return "\n".join(lines)
 
 
-def format_roi_stats(model_stats, value_stats, ai_stats) -> str:
+def format_roi_stats(overall, ml, total, rl) -> str:
     def _row(label: str, s) -> str:
         if s.n_settled == 0:
             return f"<b>{label}:</b> нет данных"
         sign = "+" if s.profit >= 0 else ""
         return (
-            f"<b>{label}:</b> {s.n_settled} игр | "
-            f"Попадания {s.hit_rate:.0f}% | "
-            f"ROI {sign}{s.roi:.1f}% | "
-            f"{sign}{s.profit:.1f} ед."
+            f"<b>{label}:</b> {s.n_settled} ст. | "
+            f"{s.hit_rate:.0f}% зашло | "
+            f"ROI {sign}{s.roi:.1f}% | {sign}{s.profit:.1f} ед."
         )
 
-    all_empty = model_stats.n_settled == 0 and value_stats.n_settled == 0 and ai_stats.n_settled == 0
     lines = [
         "📊 <b>Статистика сигналов</b>",
         "",
-        _row("📊 MODEL (без коэффа)", model_stats),
-        _row("🔥 VALUE (с edge)", value_stats),
-        _row("🤖 AI-ансамбль", ai_stats),
+        _row("🔥 Всего", overall),
+        "",
+        "<b>По рынкам:</b>",
+        _row("Мани-лайн", ml),
+        _row("Тотал", total),
+        _row("Ран-лайн", rl),
     ]
-    if all_empty:
+    if overall.n_settled == 0:
         lines += [
             "",
             "<i>ℹ️ Статистика накапливается по мере работы бота.</i>",
-            "<i>Данные появятся после того, как первые сигналы сыграют.</i>",
-            "<i>Сигналы генерируются за 3 ч до игры, закрываются автоматически.</i>",
+            "<i>Сигналы генерируются за 5 ч до игры и закрываются автоматически.</i>",
         ]
     return "\n".join(lines)
 
