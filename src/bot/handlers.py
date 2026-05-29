@@ -1073,77 +1073,60 @@ async def cmd_digest_now(msg: Message):
 
 @router.message(Command("test_odds"))
 async def cmd_test_odds(msg: Message):
-    """Direct Odds API connectivity test — bypasses cache."""
+    """Odds API status from CACHE — does NOT spend API quota."""
     if not is_admin(msg.from_user.id):
         return
 
-    import aiohttp
-    from src.data.odds_api import BASE_URL, SPORT, REGIONS, MARKETS
+    from src.data.odds_api import OddsApiClient
+    from src.data.settings_store import get_str
+    import time as _time
 
     key = settings.odds_api_key
     if not key:
         await msg.answer("❌ ODDS_API_KEY не задан в переменных Railway!\nДобавь Variables → ODDS_API_KEY=твой_ключ")
         return
 
-    await msg.answer(f"🔑 Ключ задан: ...{key[-6:]}\n⏳ Делаю прямой запрос к API (без кэша)...")
+    await msg.answer(f"🔑 Ключ задан: ...{key[-6:]}\n📦 Читаю из кэша (квота НЕ тратится)...")
 
-    params = {
-        "apiKey": key,
-        "regions": REGIONS,
-        "markets": MARKETS,
-        "dateFormat": "iso",
-        "oddsFormat": "decimal",
-    }
+    client = OddsApiClient(key)
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{BASE_URL}/sports/{SPORT}/odds"
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                remaining = r.headers.get("x-requests-remaining", "?")
-                used = r.headers.get("x-requests-used", "?")
-                status = r.status
-
-                if status == 401:
-                    await msg.answer("❌ HTTP 401 — ключ неверный или просрочен\nПроверь ключ на https://the-odds-api.com/account/")
-                    return
-                if status == 422:
-                    body = await r.text()
-                    await msg.answer(f"❌ HTTP 422 — неверный параметр запроса\n<code>{body[:300]}</code>")
-                    return
-                if status == 429:
-                    await msg.answer("❌ HTTP 429 — превышен лимит запросов (500/месяц на бесплатном тарифе)\nКупи план или жди следующего месяца")
-                    return
-                if status >= 400:
-                    body = await r.text()
-                    await msg.answer(f"❌ HTTP {status}\n<code>{body[:300]}</code>")
-                    return
-
-                events = await r.json()
-                n = len(events) if isinstance(events, list) else 0
-
-                lines = [
-                    f"✅ <b>Odds API работает</b>",
-                    f"📊 Использовано запросов: {used}",
-                    f"📊 Осталось запросов: {remaining}",
-                    f"⚾ Событий в ответе: {n}",
-                ]
-                if n == 0:
-                    lines.append("⚠️ API вернул 0 событий — возможно нет активных рынков")
-                else:
-                    # Show first 3 events
-                    lines.append("\n<b>Первые события из ответа:</b>")
-                    for ev in events[:3]:
-                        ht = ev.get("home_team", "?")
-                        at = ev.get("away_team", "?")
-                        ct = ev.get("commence_time", "?")
-                        bk_count = len(ev.get("bookmakers", []))
-                        lines.append(f"• {ht} vs {at} | {ct} | {bk_count} букмекеров")
-                    if n > 3:
-                        lines.append(f"... и ещё {n-3} событий")
-
-                await msg.answer("\n".join(lines))
-
+        events = await client.fetch_mlb_odds()
     except Exception as e:
-        await msg.answer(f"❌ Ошибка соединения: <code>{e}</code>")
+        await msg.answer(f"❌ Ошибка: <code>{e}</code>")
+        return
+    finally:
+        await client.close()
+
+    remaining = await get_str("odds_quota_remaining", "?")
+    used = await get_str("odds_quota_used", "?")
+    ts_raw = await get_str("odds_quota_ts", "0")
+    try:
+        age_min = int((_time.time() - float(ts_raw)) / 60)
+        age_str = f"{age_min} мин назад" if age_min < 120 else f"{age_min // 60} ч назад"
+    except Exception:
+        age_str = "?"
+
+    n = len(events) if isinstance(events, list) else 0
+    lines = [
+        "✅ <b>Odds API (из кэша)</b>",
+        f"📊 Осталось запросов: {remaining} (использовано {used})",
+        f"🕐 Квота обновлена: {age_str}",
+        f"⚾ Событий в кэше: {n}",
+    ]
+    if n == 0:
+        lines.append("⚠️ Кэш пуст — возможно нет активных игр или ключ не работает")
+    else:
+        lines.append("\n<b>Первые события:</b>")
+        for ev in events[:3]:
+            ht = ev.get("home_team", "?")
+            at = ev.get("away_team", "?")
+            ct = ev.get("commence_time", "?")
+            bk_count = len(ev.get("bookmakers", []))
+            lines.append(f"• {ht} vs {at} | {ct} | {bk_count} букмекеров")
+        if n > 3:
+            lines.append(f"... и ещё {n-3} событий")
+    lines.append("\n<i>Кэф кэшируется на 4 часа — команда квоту не тратит.</i>")
+    await msg.answer("\n".join(lines))
 
 
 # ─── Catch-all ────────────────────────────────────────────────────────────────
