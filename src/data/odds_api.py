@@ -17,13 +17,12 @@ from loguru import logger
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "baseball_mlb"
-# us = FanDuel/DraftKings/BetMGM; eu = Pinnacle (sharpest lines)
-REGIONS = "us,eu"
+# Quota = markets × regions per request. Keep ONE region to halve cost.
+# us = FanDuel/DraftKings/BetMGM (plenty of books + varied total lines).
+REGIONS = "us"
 MARKETS = "h2h,totals,spreads"
-# Best-effort extra lines (may be unavailable on free tier → silently skipped)
-ALT_MARKETS = "alternate_totals,alternate_spreads"
 
-CACHE_TTL = 7200.0  # 2 hours
+CACHE_TTL = 14400.0  # 4 hours — fewer real requests, saves quota
 
 # Module-level cache: (timestamp, events_list)
 _cache: Tuple[float, List[Dict]] = (0.0, [])
@@ -158,40 +157,6 @@ class OddsApiClient:
             logger.warning(f"the-odds-api scores fetch failed: {e}")
             return []
 
-    async def _merge_alt_markets(self, events: List[Dict[str, Any]]) -> None:
-        """Best-effort: fetch alternate_totals/spreads and merge into events.
-
-        Free tier may return 422 — if so we silently skip (main odds still work).
-        """
-        params = {
-            "apiKey": self.api_key,
-            "regions": REGIONS,
-            "markets": ALT_MARKETS,
-            "dateFormat": "iso",
-            "oddsFormat": "decimal",
-        }
-        try:
-            session = await self._get_session()
-            url = f"{BASE_URL}/sports/{SPORT}/odds"
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                if r.status >= 400:
-                    logger.info(f"the-odds-api alt markets unavailable ({r.status}) — using main lines only")
-                    return
-                alt = await r.json()
-                if not isinstance(alt, list):
-                    return
-                by_id = {e.get("id"): e for e in events}
-                merged = 0
-                for ae in alt:
-                    me = by_id.get(ae.get("id"))
-                    if me is None:
-                        continue
-                    me.setdefault("bookmakers", []).extend(ae.get("bookmakers", []))
-                    merged += 1
-                logger.info(f"the-odds-api: merged alt lines into {merged} events")
-        except Exception as e:
-            logger.debug(f"alt markets merge skipped: {e}")
-
     async def fetch_mlb_odds(self) -> List[Dict[str, Any]]:
         """Fetch all upcoming MLB games with ML/totals/spreads odds.
 
@@ -238,6 +203,14 @@ class OddsApiClient:
                 remaining = r.headers.get("x-requests-remaining", "?")
                 used = r.headers.get("x-requests-used", "?")
                 logger.info(f"the-odds-api: used={used} remaining={remaining}")
+                # Persist quota so /test_odds can show it without spending a request
+                try:
+                    from src.data.settings_store import set_str
+                    await set_str("odds_quota_remaining", str(remaining))
+                    await set_str("odds_quota_used", str(used))
+                    await set_str("odds_quota_ts", str(time.time()))
+                except Exception:
+                    pass
                 if remaining != "?" and int(remaining) < 50:
                     logger.warning(f"the-odds-api: LOW QUOTA — only {remaining} requests left this month!")
                 if r.status == 401:
@@ -255,8 +228,6 @@ class OddsApiClient:
                     logger.warning(f"the-odds-api: unexpected response type {type(events)}")
                     return []
                 logger.info(f"the-odds-api: fetched {len(events)} MLB events")
-                # Best-effort: enrich with alternate total/spread lines
-                await self._merge_alt_markets(events)
                 _cache = (time.monotonic(), events)
                 # Persist to DB so cache survives container restarts
                 try:
