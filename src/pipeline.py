@@ -5,7 +5,6 @@ XGBoost model removed. Claude analyzes every game with real odds.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timedelta
 from typing import List
 
@@ -16,23 +15,12 @@ from src.ai.predictor import ai_predict
 from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
-from src.data.database import AiPrediction, Match, SessionLocal, Signal as SignalRow, Team
+from src.data.database import Match, SessionLocal, Signal as SignalRow, Team
 from src.data.mlb_api import MlbApiClient
-from src.data.ingest import ingest_history, ingest_upcoming
+from src.data.ingest import ingest_upcoming
+from src.signals.generator import Signal, _kelly, MAX_EDGE
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
-from src.signals.generator import Signal, _book_odds_for, _kelly, MAX_EDGE
 from src.signals.tracker import settle_pending, enrich_scores_from_odds_api
-
-
-async def bootstrap_history(seasons: List[int] | None = None) -> int:
-    if seasons is None:
-        this_year = datetime.utcnow().year
-        seasons = [this_year - 3, this_year - 2, this_year - 1]
-    client = MlbApiClient(sport_id=settings.mlb_sport_id)
-    try:
-        return await ingest_history(client, seasons)
-    finally:
-        await client.close()
 
 
 async def refresh_upcoming(days: int = 7) -> int:
@@ -254,18 +242,11 @@ async def generate_and_broadcast(bot) -> int:
         except Exception as e:
             logger.debug(f"get_team_context failed for {match.id}: {e}")
 
-        # Neutral probs — Claude decides based on pitchers/odds/context
-        ml_probs = {
-            "p_home": 0.5, "p_away": 0.5,
-            "p_over85": 0.5, "p_itb_home": 0.5, "p_itb_away": 0.5,
-        }
-
         async with sem:
             ai = await ai_predict(
                 match_id=match.id,
                 home=home_name, away=away_name,
                 competition=match.competition or "MLB",
-                ml_probs=ml_probs,
                 features=feat_dict,
             )
         return match.id, ai, odds
@@ -325,14 +306,3 @@ async def daily_cycle(bot) -> None:
     await settle_pending()
     await generate_and_broadcast(bot)
     logger.info("Daily cycle done")
-
-
-# kept for backwards compat (admin train command)
-async def train_models(bot=None) -> None:
-    logger.info("train_models: XGBoost removed, nothing to train")
-    if bot:
-        for admin_id in settings.admin_ids:
-            try:
-                await bot.send_message(admin_id, "ℹ️ Модели XGBoost отключены — бот работает на Claude.")
-            except Exception:
-                pass

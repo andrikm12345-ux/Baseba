@@ -274,7 +274,6 @@ async def ai_predict(
     home: str,
     away: str,
     competition: str,
-    ml_probs: dict,
     features: dict,
 ) -> Optional[dict]:
     """Returns {market, pick, line, confidence, reasoning} or None."""

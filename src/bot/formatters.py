@@ -13,8 +13,6 @@ MARKET_LABELS: dict[str, str] = {
     "ML": "Мани-лайн",
     "TOTAL": "Тотал",
     "RL": "Ран-лайн",
-    "ITB": "ИТБ",
-    "F5": "Первые 5 иннингов",
 }
 
 PICK_LABELS: dict[str, str] = {
@@ -23,9 +21,7 @@ PICK_LABELS: dict[str, str] = {
     "OVER": "Тотал Б",
     "UNDER": "Тотал М",
     "COVER": f"−{settings.rl_line}",
-    "LAY": f"+{settings.rl_line}",
-    "HOME_OVER": "Хозяева ТБ",
-    "AWAY_OVER": "Гости ТБ",
+    "AWAY_COVER": f"−{settings.rl_line}",
 }
 
 
@@ -77,14 +73,10 @@ def format_signal(
     elif signal.market == "RL":
         rl = ln if ln is not None else settings.rl_line
         market_label = f"Ран-лайн (±{rl:g})"
-        if signal.pick == "COVER":
-            pick_label = f"{home_name} −{rl:g}"
-        elif signal.pick == "AWAY_COVER":
+        if signal.pick == "AWAY_COVER":
             pick_label = f"{away_name} −{rl:g}"
-        elif signal.pick == "LAY":
-            pick_label = f"{away_name} +{rl:g}"
-        else:
-            pick_label = f"{home_name} +{rl:g}"
+        else:  # COVER
+            pick_label = f"{home_name} −{rl:g}"
     else:
         pick_label = PICK_LABELS.get(signal.pick, signal.pick)
 
@@ -114,81 +106,6 @@ def format_signal(
             f"<b>Edge:</b> +{signal.edge:.1%}",
             f"<b>Ставка:</b> {signal.stake_units:.2f} ед.",
         ]
-    return "\n".join(lines)
-
-
-def format_signal_short(signals: list[Signal], matches: dict, teams: dict) -> str:
-    """Compact one-liner per signal for digest messages."""
-    if not signals:
-        return "Нет активных сигналов."
-    value_sigs = sorted([s for s in signals if s.is_value], key=lambda s: -s.edge)
-    model_sigs = sorted([s for s in signals if not s.is_value], key=lambda s: -s.confidence)
-    ordered = value_sigs + model_sigs
-    lines = []
-    for s in ordered[:10]:
-        m = matches.get(s.match_id)
-        if not m:
-            continue
-        home = teams.get(m.home_team_id)
-        away = teams.get(m.away_team_id)
-        h_name = (home.short_name or home.name)[:12] if home else "?"
-        a_name = (away.short_name or away.name)[:12] if away else "?"
-        market_label = MARKET_LABELS.get(s.market, s.market)
-        if s.market == "RL":
-            if s.pick == "COVER":
-                pick_label = f"{h_name} −{settings.rl_line}"
-            elif s.pick == "LAY":
-                pick_label = f"{a_name} +{settings.rl_line}"
-            elif s.pick == "AWAY_COVER":
-                pick_label = f"{a_name} −{settings.rl_line}"
-            else:
-                pick_label = f"{h_name} +{settings.rl_line}"
-        elif s.market == "ITB":
-            team = h_name if s.pick == "HOME_OVER" else a_name
-            pick_label = f"{team} ТБ {settings.itb_line}"
-        else:
-            pick_label = PICK_LABELS.get(s.pick, s.pick)
-        badge = "🔥" if s.is_value else "📊"
-        line = f"{badge} {h_name}–{a_name} | {market_label} → {pick_label} ({s.confidence:.0%})"
-        if s.book_odds and s.book_odds > 1.0:
-            line += f" @ {s.book_odds:.2f}"
-        if s.is_value and s.edge > 0:
-            line += f" | edge {s.edge:.1%}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def format_training_report(metrics: dict) -> str:
-    n = metrics.get("n_train", 0)
-    lines = [
-        "🏋️ <b>Модели обновлены (MLB)</b>",
-        f"Обучено на {n} играх",
-        "",
-        "<b>In-sample Brier:</b>",
-        f"  ML (мани-лайн): {metrics.get('ml_brier', 0):.4f}",
-        f"  TOTAL (тотал): {metrics.get('total_brier', 0):.4f}",
-        f"  RL (ран-лайн): {metrics.get('rl_brier', 0):.4f}",
-    ]
-    wf = metrics.get("walk_forward", {})
-    if wf:
-        lines += [
-            "",
-            "<b>Walk-forward (out-of-sample):</b>",
-            f"  ML: {wf.get('ml_brier', 0):.4f}",
-            f"  TOTAL: {wf.get('total_brier', 0):.4f}",
-            f"  RL: {wf.get('rl_brier', 0):.4f}",
-        ]
-    top = metrics.get("top_features", [])
-    if top:
-        lines += ["", "<b>Топ-5 признаков (ML):</b>"]
-        lines += [f"  {i+1}. {f}" for i, f in enumerate(top)]
-    diff = metrics.get("diff_vs_prev", {})
-    if diff:
-        lines.append("")
-        lines.append("<b>Δ vs предыдущая версия:</b>")
-        for k, v in diff.items():
-            arrow = "↓" if v < 0 else "↑"
-            lines.append(f"  {k}: {arrow}{abs(v):.4f}")
     return "\n".join(lines)
 
 
@@ -263,7 +180,7 @@ def format_history(day_groups: list) -> str:
             hr, ar = it.get("home_runs"), it.get("away_runs")
             score = f"{h} {hr}:{ar} {a}" if (hr is not None and ar is not None) else f"{h} vs {a}"
 
-            m_short = {"ML": "ML", "TOTAL": "Тотал", "ITB": "ИТБ"}.get(it["market"], it["market"])
+            m_short = MARKET_LABELS.get(it["market"], it["market"])
             p_short = PICK_LABELS.get(it["pick"], it["pick"])
             odds = it.get("book_odds") or 0.0
 

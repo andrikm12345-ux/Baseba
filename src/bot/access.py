@@ -39,7 +39,6 @@ class AccessMiddleware(BaseMiddleware):
                     # Notify admins about new lead
                     await session.commit()
                     try:
-                        from aiogram import Bot
                         bot = event.bot if hasattr(event, "bot") else None
                         if bot is None and isinstance(event, (Message, CallbackQuery)):
                             bot = event.bot

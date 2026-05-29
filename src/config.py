@@ -50,16 +50,11 @@ class Settings(BaseSettings):
     tavily_api_key: Optional[str] = None
     leagues: list[str] = ["mlb"]
     database_url: Optional[str] = None
-    min_edge: float = 0.03
-    min_confidence: float = 0.55
+    min_edge: float = 0.03          # min divergence vs market no-vig probability
     min_odds: float = 1.90
     max_odds: float = 4.50
-    total_line: float = 8.5
-    rl_line: float = 1.5
-    itb_line: float = 4.5
-    ai_ensemble_weight: float = 0.3
-    ai_ensemble_top_n: int = 10
-    ai_ensemble_min_prob: float = 0.55
+    total_line: float = 8.5         # fallback line for display only
+    rl_line: float = 1.5            # fallback run-line for display only
     tz: str = "Europe/Moscow"
 
     def __init__(self, **data):

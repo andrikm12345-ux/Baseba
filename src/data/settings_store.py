@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 
 from loguru import logger
-from sqlalchemy import select
 
 from src.data.database import SessionLocal, Setting
 

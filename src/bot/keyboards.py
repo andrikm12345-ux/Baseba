@@ -24,18 +24,6 @@ def history_nav_kb(page: int, has_next: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
-def signals_filter_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Все", callback_data="filter:all"),
-            InlineKeyboardButton(text="ML", callback_data="filter:ML"),
-            InlineKeyboardButton(text="Тотал", callback_data="filter:TOTAL"),
-            InlineKeyboardButton(text="ИТБ", callback_data="filter:ITB"),
-            InlineKeyboardButton(text="VALUE", callback_data="filter:value"),
-        ],
-    ])
-
-
 def admin_menu(leads_count: int = 0, ai_on: bool = False) -> InlineKeyboardMarkup:
     leads_label = f"📋 Лиды ({leads_count})" if leads_count else "📋 Лиды"
     ai_label = f"🤖 AI {'✅' if ai_on else '❌'}"
@@ -49,7 +37,6 @@ def admin_menu(leads_count: int = 0, ai_on: bool = False) -> InlineKeyboardMarku
             InlineKeyboardButton(text=ai_label, callback_data="admin:ai_toggle"),
         ],
         [
-            InlineKeyboardButton(text="🔄 Обучить модели", callback_data="admin:train"),
             InlineKeyboardButton(text="🔙 Закрыть", callback_data="admin:close"),
         ],
     ])

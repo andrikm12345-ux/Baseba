@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import io
-import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
@@ -23,13 +22,10 @@ from src.bot.formatters import (
     format_history,
     format_roi_stats,
     format_signal,
-    format_signal_short,
-    format_training_report,
 )
 from src.bot.keyboards import admin_menu, history_nav_kb, lead_kb, main_menu, notifications_kb, user_remove_kb
 from src.config import settings
 from src.data.database import (
-    AiPrediction,
     Match,
     PendingUser,
     SessionLocal,
@@ -81,11 +77,11 @@ async def cmd_help(msg: Message):
 @router.message(Command("signals"))
 @router.message(lambda m: m.text == "⚾ Сигналы")
 async def cmd_signals(msg: Message):
-    await _show_signals(msg, flt="all")
+    await _show_signals(msg)
 
 
-async def _show_signals(event, flt: str = "all"):
-    """Show signals — works with both Message and CallbackQuery."""
+async def _show_signals(event):
+    """Show active (unsettled) signals — works with both Message and CallbackQuery."""
     is_cb = isinstance(event, CallbackQuery)
     send = event.message.answer if is_cb else event.answer
 
@@ -102,19 +98,11 @@ async def _show_signals(event, flt: str = "all"):
             .order_by(Match.utc_date.asc())
             .limit(20)
         )
-        if flt == "ML":
-            q = q.where(Signal.market == "ML")
-        elif flt == "TOTAL":
-            q = q.where(Signal.market == "TOTAL")
-        elif flt == "ITB":
-            q = q.where(Signal.market == "ITB")
-        elif flt == "value":
-            q = q.where(Signal.book_odds > 1.0)
         signals: List[Signal] = list((await session.execute(q)).scalars())
         if not signals:
             await send(
                 "📭 <b>Активных сигналов нет.</b>\n\n"
-                "Сигналы появляются за 3 часа до начала игры.\n"
+                "Сигналы появляются за 5 часов до начала игры.\n"
                 "Нажмите <b>🔄 Запустить анализ</b> для проверки ближайших игр.\n"
                 "Прошедшие ставки — в разделе <b>📜 История ставок</b>.",
                 parse_mode="HTML",
@@ -122,7 +110,6 @@ async def _show_signals(event, flt: str = "all"):
             if is_cb:
                 await event.answer()
             return
-        ai_on = await get_bool("ai_ensemble_enabled", False)
         texts = []
         for s in signals:
             match = await session.get(Match, s.match_id)
@@ -130,9 +117,7 @@ async def _show_signals(event, flt: str = "all"):
                 continue
             home = await session.get(Team, match.home_team_id)
             away = await session.get(Team, match.away_team_id)
-            ai_comment = None
-            if ai_on and s.is_ai_ensemble and s.commentary:
-                ai_comment = s.commentary
+            ai_comment = s.commentary if s.commentary else None
             texts.append(format_signal(s, match, home, away, ai_comment))
     if not texts:
         await send("Нет активных сигналов.")
@@ -298,28 +283,17 @@ async def cb_notif_toggle(cb: CallbackQuery):
 async def cmd_refresh_odds(msg: Message):
     await msg.answer("🔄 Запускаю обновление расписания...")
     try:
-        from src.pipeline import refresh_upcoming, generate_and_broadcast, train_models
+        from src.pipeline import refresh_upcoming, generate_and_broadcast
         from src.signals.tracker import settle_pending
-        from src.ml.predict import Predictor
-        from sqlalchemy import select, func
-        from src.data.database import Signal, Match
+        from sqlalchemy import func
 
         n = await refresh_upcoming(days=3)
 
-        # Статус моделей
-        predictor = Predictor()
-        models_ready = predictor.ready
-
-        # Диагностика: считаем сигналы и завершённые матчи
         async with SessionLocal() as session:
             total_sigs = (await session.execute(select(func.count()).select_from(Signal))).scalar()
             unsettled = (await session.execute(
                 select(func.count()).select_from(Signal).where(Signal.settled.is_(False))
             )).scalar()
-            finished_matches = (await session.execute(
-                select(func.count()).select_from(Match).where(Match.status == "FINISHED")
-            )).scalar()
-            # Next game without a signal yet (exclude already-signaled matches)
             now_utc = datetime.utcnow()
             signaled_ids_sq = select(Signal.match_id).distinct().scalar_subquery()
             next_game = (await session.execute(
@@ -330,7 +304,6 @@ async def cmd_refresh_odds(msg: Message):
                 ).order_by(Match.utc_date).limit(1)
             )).scalar_one_or_none()
 
-        model_status = "✅ готовы" if models_ready else "⏳ ещё обучаются"
         next_signal_hint = ""
         if next_game:
             signal_time = next_game.utc_date - timedelta(hours=5)
@@ -345,35 +318,20 @@ async def cmd_refresh_odds(msg: Message):
 
         await msg.answer(
             f"✅ Загружено {n} матчей\n"
-            f"🤖 Модели: {model_status}\n"
-            f"📊 Сигналов в БД: {total_sigs} (незакрытых: {unsettled})\n"
-            f"🏁 Завершённых матчей: {finished_matches}"
+            f"📊 Сигналов в БД: {total_sigs} (незакрытых: {unsettled})"
             f"{next_signal_hint}\n\n"
             f"Закрываю сыгранные..."
         )
 
-        # Если модели не готовы — запускаем обучение в фоне
-        if not models_ready and finished_matches >= 200:
-            await msg.answer(
-                "⚙️ Модели не найдены — запускаю обучение в фоне (~5 мин).\n"
-                "Придёт уведомление когда готово. Сигналы появятся после обучения."
-            )
-            import asyncio as _aio
-            _aio.create_task(train_models(bot=msg.bot))
-
         settled = await settle_pending()
-        await msg.answer(
-            f"✅ Закрыто сигналов: {settled}\n"
-            f"Генерирую новые сигналы..."
-        )
+        await msg.answer(f"✅ Закрыто сигналов: {settled}\nГенерирую новые сигналы...")
         new_count = await generate_and_broadcast(msg.bot)
         if new_count == 0:
             await msg.answer(
-                f"📭 Новых сигналов нет.\n"
-                f"{next_signal_hint}\n\n"
-                "Возможные причины: сигналы уже были отправлены ранее, "
-                "нет игр в ближайшие 5 часов или модели ещё обучаются.\n"
-                "Сигналы появятся автоматически за 5 часов до начала игры.",
+                f"📭 Новых сигналов нет.{next_signal_hint}\n\n"
+                "Возможные причины: сигналы уже отправлены ранее, нет игр в ближайшие 5 часов, "
+                "или нет кэфов с расхождением против рынка.\n"
+                "Сигналы появляются автоматически за 5 часов до начала игры.",
                 reply_markup=main_menu(),
             )
         else:
@@ -495,18 +453,6 @@ async def cmd_admin(msg: Message):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(Command("train"))
-async def cmd_train(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    await msg.answer("🔄 Обучение моделей запущено, подождите...")
-    try:
-        from src.pipeline import train_models
-        await train_models(bot=msg.bot)
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка обучения: {e}")
-
-
 @router.message(Command("purge_signals"))
 async def cmd_purge_signals(msg: Message):
     """Delete no-odds signals (book_odds=0) for unsettled future games.
@@ -581,14 +527,6 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext):
         await _admin_leads(cb)
     elif action == "ai_toggle":
         await _admin_ai_toggle(cb)
-    elif action == "train":
-        await cb.answer("Запускаю обучение...")
-        await cb.message.answer("🔄 Обучение моделей запущено, подождите...")
-        try:
-            from src.pipeline import train_models
-            await train_models(bot=cb.bot)
-        except Exception as e:
-            await cb.message.answer(f"❌ Ошибка обучения: {e}")
     elif action == "add_user":
         await state.set_state(AdminStates.waiting_user_id)
         await cb.message.answer(
@@ -853,14 +791,10 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
 
 
 async def broadcast_morning_digest(bot: Bot) -> None:
-    """Утренний дайджест = расписание сегодняшних игр с прогнозом модели.
+    """Утренний дайджест = расписание сегодняшних игр с питчерами.
 
     НЕ показывает сигналы (их ещё нет — они придут за 5ч до игры).
-    Показывает ВСЕ сегодняшние игры с питчерами и вероятностями из ML-модели.
     """
-    from src.ml.predict import Predictor
-    from src.data.features import build_inference_features
-
     now_utc = datetime.utcnow()
     msk = timezone(timedelta(hours=3))
 
@@ -896,15 +830,12 @@ async def broadcast_morning_digest(bot: Bot) -> None:
     msk_now_str = now_utc.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%d.%m")
     lines = [f"☀️ <b>Расписание MLB на {msk_now_str}</b> — {len(today_matches)} игр\n"]
 
-    predictor = Predictor()
-
     for m in today_matches:
         home_t = teams_cache.get(m.home_team_id)
         away_t = teams_cache.get(m.away_team_id)
         home_name = home_t.name if home_t else f"Team#{m.home_team_id}"
         away_name = away_t.name if away_t else f"Team#{m.away_team_id}"
 
-        # Аббревиатура команды (последние 3 буквы или первые 3 слова)
         def _abbr(name: str) -> str:
             parts = name.split()
             return parts[-1][:3].upper() if parts else name[:3].upper()
@@ -915,64 +846,24 @@ async def broadcast_morning_digest(bot: Bot) -> None:
         game_msk = m.utc_date.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
         signal_msk = (m.utc_date - timedelta(hours=5)).replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
 
-        # Питчеры
         hp = f"{m.home_pitcher_name or '?'} ERA {m.home_pitcher_era or '?'}"
         ap = f"{m.away_pitcher_name or '?'} ERA {m.away_pitcher_era or '?'}"
 
-        # ML-вероятности если модель готова
-        prob_str = ""
-        if predictor.ready:
-            try:
-                import pandas as pd
-                from src.data.database import SessionLocal as SL
-                # Быстрый прогноз через predict
-                row_df = pd.DataFrame([{
-                    "match_id": m.id,
-                    "home_team_id": m.home_team_id,
-                    "away_team_id": m.away_team_id,
-                    "home_pitcher_era": m.home_pitcher_era or 4.5,
-                    "home_pitcher_whip": m.home_pitcher_whip or 1.3,
-                    "home_pitcher_k9": m.home_pitcher_k9 or 8.0,
-                    "home_pitcher_bb9": m.home_pitcher_bb9 or 3.0,
-                    "away_pitcher_era": m.away_pitcher_era or 4.5,
-                    "away_pitcher_whip": m.away_pitcher_whip or 1.3,
-                    "away_pitcher_k9": m.away_pitcher_k9 or 8.0,
-                    "away_pitcher_bb9": m.away_pitcher_bb9 or 3.0,
-                    "era_diff": (m.home_pitcher_era or 4.5) - (m.away_pitcher_era or 4.5),
-                    "home_win_rate": 0.5, "away_win_rate": 0.5,
-                    "home_run_rate": 4.5, "away_run_rate": 4.5,
-                    "h2h_home_win_rate": 0.5,
-                }])
-                preds = predictor.predict(row_df)
-                if not preds.empty:
-                    p_h = float(preds.iloc[0].get("p_home", 0.5))
-                    p_a = float(preds.iloc[0].get("p_away", 0.5))
-                    fav = home_abbr if p_h >= p_a else away_abbr
-                    fav_p = max(p_h, p_a)
-                    prob_str = f" · {fav} {fav_p:.0%}"
-            except Exception:
-                pass
-
         # Уже есть сигнал?
-        signal_tag = ""
         async with SessionLocal() as sess:
             existing_sig = (await sess.execute(
                 select(Signal).where(Signal.match_id == m.id)
             )).scalar_one_or_none()
-        if existing_sig:
-            from src.bot.formatters import MARKET_LABELS, PICK_LABELS
+        if existing_sig and existing_sig.book_odds and existing_sig.book_odds > 1.0:
             mkt = MARKET_LABELS.get(existing_sig.market, existing_sig.market)
             pick = PICK_LABELS.get(existing_sig.pick, existing_sig.pick)
-            if existing_sig.book_odds and existing_sig.book_odds > 1.0:
-                signal_tag = f"\n   ✅ Сигнал: {mkt} {pick} @ {existing_sig.book_odds:.2f}"
-            else:
-                signal_tag = f"\n   ⏰ Сигнал в ~{signal_msk} МСК"
+            signal_tag = f"\n   ✅ Сигнал: {mkt} {pick} @ {existing_sig.book_odds:.2f}"
         else:
             signal_tag = f"\n   ⏰ Сигнал в ~{signal_msk} МСК"
 
         lines.append(
             f"⚾ <b>{home_abbr}–{away_abbr}</b> {game_msk} МСК\n"
-            f"   🎯 {hp} / {ap}{prob_str}"
+            f"   🎯 {hp} / {ap}"
             f"{signal_tag}"
         )
 
@@ -1043,14 +934,15 @@ async def broadcast_results_summary(bot: Bot) -> None:
 
         icon = "✅" if s.won else "❌"
         score = f"{m.home_runs}:{m.away_runs}" if m.home_runs is not None else "–:–"
-        from src.bot.formatters import MARKET_LABELS, PICK_LABELS
-        mkt = {"ML": "ML", "TOTAL": "Тотал", "ITB": "ИТБ", "F5": "F5"}.get(s.market, s.market)
+        mkt = MARKET_LABELS.get(s.market, s.market)
+        ln = getattr(s, "line", None)
+        ln_str = f" {ln:g}" if ln is not None else ""
         pick = PICK_LABELS.get(s.pick, s.pick)
         odds_str = f" @ {s.book_odds:.2f}" if s.book_odds and s.book_odds > 1.0 else ""
         profit = s.profit_units or 0.0
         p_str = f"{'+' if profit >= 0 else ''}{profit:.2f}"
 
-        lines.append(f"{icon} {h}–{a} {score} | {mkt} {pick}{odds_str} → {p_str} ед.")
+        lines.append(f"{icon} {h}–{a} {score} | {mkt}{ln_str} {pick}{odds_str} → {p_str} ед.")
 
     await broadcast_signal(bot, "\n".join(lines))
 
@@ -1064,9 +956,7 @@ async def cmd_check_signals(msg: Message):
         return
     await msg.answer("🔍 Диагностика сигналов...")
 
-    from src.ml.predict import Predictor
     from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
-    from src.signals.generator import _book_odds_for, _kelly
 
     now_utc = datetime.utcnow()
     horizon = now_utc + timedelta(hours=12)
@@ -1100,7 +990,6 @@ async def cmd_check_signals(msg: Message):
         return
 
     msk = timezone(timedelta(hours=3))
-    predictor = Predictor()
 
     # Fetch odds
     odds_map: dict = {}
@@ -1120,8 +1009,6 @@ async def cmd_check_signals(msg: Message):
 
     lines = [f"🔍 <b>Диагностика — {len(upcoming)} игр (ближайшие 12ч)</b>\n"]
 
-    import pandas as pd
-
     for m in upcoming:
         ht = teams_cache.get(m.home_team_id)
         at = teams_cache.get(m.away_team_id)
@@ -1130,35 +1017,6 @@ async def cmd_check_signals(msg: Message):
         game_msk = m.utc_date.replace(tzinfo=timezone.utc).astimezone(msk).strftime("%H:%M")
 
         already = "✅ сигнал есть" if m.id in signaled else ""
-
-        # Model probs
-        p_home = p_away = 0.5
-        p_over = 0.5
-        if predictor.ready:
-            try:
-                row_df = pd.DataFrame([{
-                    "match_id": m.id,
-                    "home_team_id": m.home_team_id, "away_team_id": m.away_team_id,
-                    "home_pitcher_era": m.home_pitcher_era or 4.5,
-                    "home_pitcher_whip": m.home_pitcher_whip or 1.3,
-                    "home_pitcher_k9": m.home_pitcher_k9 or 8.0,
-                    "home_pitcher_bb9": m.home_pitcher_bb9 or 3.0,
-                    "away_pitcher_era": m.away_pitcher_era or 4.5,
-                    "away_pitcher_whip": m.away_pitcher_whip or 1.3,
-                    "away_pitcher_k9": m.away_pitcher_k9 or 8.0,
-                    "away_pitcher_bb9": m.away_pitcher_bb9 or 3.0,
-                    "era_diff": (m.home_pitcher_era or 4.5) - (m.away_pitcher_era or 4.5),
-                    "home_win_rate": 0.5, "away_win_rate": 0.5,
-                    "home_run_rate": 4.5, "away_run_rate": 4.5,
-                    "h2h_home_win_rate": 0.5,
-                }])
-                preds = predictor.predict(row_df)
-                if not preds.empty:
-                    p_home = float(preds.iloc[0].get("p_home", 0.5))
-                    p_away = float(preds.iloc[0].get("p_away", 0.5))
-                    p_over = float(preds.iloc[0].get("p_over85", 0.5))
-            except Exception as e:
-                p_home = p_away = p_over = -1.0
 
         # Odds — реальные котировки которые увидит Claude
         odds = odds_map.get(m.id) or {}

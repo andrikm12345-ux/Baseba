@@ -7,14 +7,12 @@ One call to /v4/sports/baseball_mlb/odds returns ALL upcoming games with odds.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from loguru import logger
-
-from src.config import settings
 
 
 BASE_URL = "https://api.the-odds-api.com/v4"

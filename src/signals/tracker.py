@@ -32,11 +32,6 @@ def _did_win(market, pick, home_runs, away_runs, line=None):
             return diff > ln          # home favored -ln
         if pick == "AWAY_COVER":
             return (-diff) > ln        # away favored -ln
-        # legacy underdog picks
-        if pick == "LAY":
-            return diff < ln
-        if pick == "HOME_LAY":
-            return (-diff) < ln
     return False
 
 
@@ -121,7 +116,7 @@ async def roi_stats(
 async def enrich_scores_from_odds_api(client) -> int:
     """Update home_runs/away_runs for matches that are missing scores via Odds API /scores."""
     from src.data.database import Team
-    from src.data.odds_api import _canonical, _sim
+    from src.data.odds_api import _sim
 
     scores = await client.fetch_mlb_scores()
     if not scores:
