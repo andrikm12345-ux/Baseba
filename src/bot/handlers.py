@@ -569,57 +569,6 @@ async def cmd_purge_signals(msg: Message):
     )
 
 
-@router.message(Command("debugodds"))
-async def cmd_debug_odds(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    from src.config import settings as cfg
-    if not cfg.odds_api_key:
-        await msg.answer("❌ ODDS_API_KEY не задан")
-        return
-    import json
-    from src.data.odds_api import OddsApiClient
-    client = OddsApiClient(cfg.odds_api_key)
-    try:
-        # Fetch all baseball events, find MLB league slug + check odds for first event
-        await msg.answer("🔍 Ищу MLB события (все бейсбол, до 200)...")
-        data = await client._get("/events", {"sport": "baseball", "limit": 200})
-        events = data if isinstance(data, list) else data.get("events", [])
-
-        # Collect unique league slugs
-        leagues: dict[str, str] = {}
-        mlb_events = []
-        for ev in events:
-            lg = ev.get("league") or {}
-            slug = lg.get("slug", "") if isinstance(lg, dict) else ""
-            name = lg.get("name", "") if isinstance(lg, dict) else ""
-            leagues[slug] = name
-            if "mlb" in slug.lower() or "major-league" in slug.lower():
-                mlb_events.append(ev)
-
-        league_list = "\n".join(f"  {s}: {n}" for s, n in sorted(leagues.items()))
-        await msg.answer(f"<b>Лиги в бейсболе ({len(leagues)}):</b>\n<pre>{league_list[:1000]}</pre>", parse_mode="HTML")
-
-        if mlb_events:
-            ev = mlb_events[0]
-            await msg.answer(f"<b>MLB событие найдено:</b>\n<pre>{json.dumps(ev)[:800]}</pre>", parse_mode="HTML")
-            # Try /odds for this event
-            ev_id = ev.get("id")
-            if ev_id:
-                await msg.answer(f"🔍 Запрашиваю /odds для event {ev_id}...")
-                try:
-                    odds = await client._get("/odds", {"eventId": ev_id, "bookmakers": "Bet365,Betfair Exchange"})
-                    await msg.answer(f"<b>/odds ответ:</b>\n<pre>{json.dumps(odds)[:1200]}</pre>", parse_mode="HTML")
-                except Exception as e:
-                    await msg.answer(f"/odds ошибка: {e}")
-        else:
-            await msg.answer("⚠️ MLB событий не найдено среди бейсбол событий.\nВозможно лига называется иначе — смотри список выше.")
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка: {e}")
-    finally:
-        await client.close()
-
-
 @router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
 async def cb_admin(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
