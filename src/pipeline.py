@@ -79,7 +79,9 @@ def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
     pick = ai_result.get("pick")
     confidence = float(ai_result.get("confidence", 0.0))
     line = ai_result.get("line")
-    if not market or not pick or confidence < 0.56:
+    # TOTAL needs higher confidence bar — ERA stats don't reliably predict run totals
+    min_conf = 0.62 if market == "TOTAL" else 0.56
+    if not market or not pick or confidence < min_conf:
         return None
 
     book: float = 0.0
@@ -121,7 +123,9 @@ def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
         edge = confidence - float(novig)
     else:
         edge = confidence * book - 1.0  # fallback if no-vig unavailable
-    if edge < settings.min_edge:
+    # TOTAL requires double the edge — market is efficient, hard to beat without strong conviction
+    min_edge = (settings.min_edge * 2) if market == "TOTAL" else settings.min_edge
+    if edge < min_edge:
         return None
     edge = min(edge, MAX_EDGE)
 
