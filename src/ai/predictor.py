@@ -145,16 +145,22 @@ def _build_quotes_table(home: str, away: str, features: dict) -> str:
                 f"М кэф {_fmt(t['under'])} (рынок {_pct(t.get('under_novig'))})"
             )
 
-    # Run lines (spreads)
+    # Run lines (spreads) — only show sides with valid odds to avoid confusing the model
     spreads = features.get("spread_lines") or []
     if spreads:
-        lines.append("ФОРА / РАН-ЛАЙН (по линиям, −линия = фаворит даёт фору):")
+        lines.append("ФОРА / РАН-ЛАЙН (−линия = тот кто даёт фору; только доступные ставки):")
         for s in spreads:
-            lines.append(
-                f"  Линия {s['point']}: "
-                f"{home} −{s['point']} кэф {_fmt(s['home'])} (рынок {_pct(s.get('home_novig'))}) | "
-                f"{away} −{s['point']} кэф {_fmt(s['away'])} (рынок {_pct(s.get('away_novig'))})"
-            )
+            parts = []
+            if s.get("home", 0) > 1.0:
+                parts.append(
+                    f"{home} −{s['point']} кэф {_fmt(s['home'])} (рынок {_pct(s.get('home_novig'))}) → пик COVER"
+                )
+            if s.get("away", 0) > 1.0:
+                parts.append(
+                    f"{away} −{s['point']} кэф {_fmt(s['away'])} (рынок {_pct(s.get('away_novig'))}) → пик AWAY_COVER"
+                )
+            if parts:
+                lines.append(f"  Линия {s['point']}: " + " | ".join(parts))
 
     return "\n".join(lines) if lines else "(котировок нет)"
 
