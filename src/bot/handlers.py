@@ -921,7 +921,7 @@ async def broadcast_results_summary(bot: Bot) -> None:
     profit_emoji = "📈" if total_profit >= 0 else "📉"
     profit_sign = "+" if total_profit >= 0 else ""
 
-    push_str = f"  ➖ Пуш: {len(pushed)}" if pushed else ""
+    push_str = f"  ➖ Возврат: {len(pushed)}" if pushed else ""
     lines = [
         f"📊 <b>Итоги {date_label}</b>\n",
         f"✅ Выиграно: {len(won)}  ❌ Проиграно: {len(lost)}{push_str}",

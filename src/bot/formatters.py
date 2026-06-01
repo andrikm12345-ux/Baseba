@@ -166,7 +166,7 @@ def format_history(day_groups: list) -> str:
         profit_str = f"{'+' if day_profit >= 0 else ''}{day_profit:.2f} ед."
         stats_parts = []
         if won_cnt or lost_cnt:
-            stats_parts.append(f"✅ {won_cnt}  ❌ {lost_cnt}" + (f"  ➖ {push_cnt}" if push_cnt else ""))
+            stats_parts.append(f"✅ {won_cnt}  ❌ {lost_cnt}" + (f"  ➖ Возврат: {push_cnt}" if push_cnt else ""))
         if pending_cnt:
             stats_parts.append(f"⏳ {pending_cnt}")
         if settled:
