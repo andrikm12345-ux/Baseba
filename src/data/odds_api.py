@@ -27,6 +27,11 @@ CACHE_TTL = 14400.0  # 4 hours — fewer real requests, saves quota
 # Module-level cache: (timestamp, events_list)
 _cache: Tuple[float, List[Dict]] = (0.0, [])
 
+# Alternate-markets cache (separate TTL so it doesn't block main cache)
+_alt_cache: Tuple[float, List[Dict]] = (0.0, [])
+# None = unknown, False = confirmed 422 (tier doesn't support it)
+_alt_markets_ok: Optional[bool] = None
+
 
 # ─── team name normalisation ────────────────────────────────────────────────
 
@@ -133,6 +138,53 @@ class OddsApiClient:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+
+    async def fetch_mlb_alt_spreads(self) -> List[Dict[str, Any]]:
+        """Try to fetch alternate_spreads for extra run-line options (±2.5, ±0.5 etc).
+
+        Silently returns [] and permanently disables itself if the API tier
+        returns 422 (alternate markets not included in free plan).
+        Costs ~2 extra quota units per refresh cycle (worth it if supported).
+        """
+        global _alt_cache, _alt_markets_ok
+        if _alt_markets_ok is False:
+            return []
+
+        now_mono = time.monotonic()
+        ts, data = _alt_cache
+        if now_mono - ts < CACHE_TTL and data:
+            logger.debug(f"alt_spreads memory-cache hit ({len(data)} events)")
+            return data
+
+        params = {
+            "apiKey": self.api_key,
+            "regions": REGIONS,
+            "markets": "alternate_spreads",
+            "dateFormat": "iso",
+            "oddsFormat": "decimal",
+        }
+        try:
+            session = await self._get_session()
+            url = f"{BASE_URL}/sports/{SPORT}/odds"
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                remaining = r.headers.get("x-requests-remaining", "?")
+                if r.status == 422:
+                    logger.info("alternate_spreads: 422 — not available on this API tier, disabling")
+                    _alt_markets_ok = False
+                    return []
+                if r.status >= 400:
+                    logger.warning(f"alternate_spreads: HTTP {r.status}")
+                    return []
+                events = await r.json()
+                if not isinstance(events, list):
+                    return []
+                _alt_markets_ok = True
+                _alt_cache = (now_mono, events)
+                logger.info(f"alternate_spreads: {len(events)} events, quota remaining={remaining}")
+                return events
+        except Exception as e:
+            logger.debug(f"fetch_mlb_alt_spreads failed: {e}")
+            return []
 
     async def fetch_mlb_scores(self) -> List[Dict[str, Any]]:
         """Fetch recent MLB scores for settling signals. daysFrom=3 covers last 3 days."""
@@ -440,7 +492,47 @@ def _find_event(
     return best_ev
 
 
-# ─── public interface (same as before) ──────────────────────────────────────
+def _merge_alt_into_events(main_events: List[Dict], alt_events: List[Dict]) -> List[Dict]:
+    """Inject alternate_spreads bookmaker outcomes into matching main events.
+
+    Matches by canonical home+away team names. Adds alt bookmaker entries
+    (or appends their alternate_spreads market to existing entries).
+    """
+    if not alt_events:
+        return main_events
+
+    alt_idx: Dict[Tuple[str, str], Dict] = {}
+    for ev in alt_events:
+        k = (_canonical(ev.get("home_team", "")), _canonical(ev.get("away_team", "")))
+        alt_idx[k] = ev
+
+    result = []
+    for ev in main_events:
+        k = (_canonical(ev.get("home_team", "")), _canonical(ev.get("away_team", "")))
+        alt_ev = alt_idx.get(k)
+        if not alt_ev:
+            result.append(ev)
+            continue
+        # Shallow-copy event + deep-copy bookmakers so we don't mutate cached data
+        ev = {**ev, "bookmakers": [
+            {**bk, "markets": list(bk.get("markets", []))}
+            for bk in ev.get("bookmakers", [])
+        ]}
+        bk_by_key = {bk["key"]: bk for bk in ev["bookmakers"]}
+        for alt_bk in alt_ev.get("bookmakers", []):
+            bk_key = alt_bk["key"]
+            if bk_key in bk_by_key:
+                existing_keys = {m["key"] for m in bk_by_key[bk_key]["markets"]}
+                for mkt in alt_bk.get("markets", []):
+                    if mkt["key"] not in existing_keys:
+                        bk_by_key[bk_key]["markets"].append(mkt)
+            else:
+                ev["bookmakers"].append(alt_bk)
+        result.append(ev)
+    return result
+
+
+# ─── public interface ────────────────────────────────────────────────────────
 
 async def fetch_odds_for_matches(
     client: OddsApiClient,
@@ -457,6 +549,11 @@ async def fetch_odds_for_matches(
     if not events:
         logger.warning("fetch_odds_for_matches: no events from the-odds-api")
         return {}
+
+    # Enrich with alternate spread lines (±2.5 etc); gracefully skipped on 422
+    alt_events = await client.fetch_mlb_alt_spreads()
+    if alt_events:
+        events = _merge_alt_into_events(events, alt_events)
 
     out: Dict[int, Dict[str, float]] = {}
     for match_id, _league, home, away, kickoff in upcoming:
