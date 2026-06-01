@@ -79,9 +79,7 @@ def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
     pick = ai_result.get("pick")
     confidence = float(ai_result.get("confidence", 0.0))
     line = ai_result.get("line")
-    # TOTAL needs higher confidence bar — ERA stats don't reliably predict run totals
-    min_conf = 0.62 if market == "TOTAL" else 0.56
-    if not market or not pick or confidence < min_conf:
+    if not market or not pick or confidence < 0.62:
         return None
 
     book: float = 0.0
@@ -123,9 +121,7 @@ def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
         edge = confidence - float(novig)
     else:
         edge = confidence * book - 1.0  # fallback if no-vig unavailable
-    # TOTAL requires double the edge — market is efficient, hard to beat without strong conviction
-    min_edge = (settings.min_edge * 2) if market == "TOTAL" else settings.min_edge
-    if edge < min_edge:
+    if edge < settings.min_edge:
         return None
     edge = min(edge, MAX_EDGE)
 
@@ -267,6 +263,28 @@ async def generate_and_broadcast(bot) -> int:
             continue
         signals.append(sig)
         ai_results_cache[mid] = ai
+
+    # Daily cap: check how many signals already published today (UTC), keep top-N by edge
+    if signals:
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        async with SessionLocal() as session:
+            already_today = (await session.execute(
+                select(SignalRow).join(Match, Match.id == SignalRow.match_id).where(
+                    Match.utc_date >= today_start,
+                )
+            )).scalars().all()
+        slots_left = max(0, settings.max_signals_per_day - len(already_today))
+        if slots_left == 0:
+            logger.info(f"Daily cap reached ({settings.max_signals_per_day}), skipping {len(signals)} candidates")
+            signals = []
+        elif len(signals) > slots_left:
+            signals.sort(key=lambda s: s.edge, reverse=True)
+            dropped = signals[slots_left:]
+            signals = signals[:slots_left]
+            logger.info(
+                f"Daily cap: keeping top {slots_left} by edge, dropping "
+                + ", ".join(f"{s.market}/{s.pick}(edge={s.edge:.2%})" for s in dropped)
+            )
 
     new_rows = await _store_signals(signals)
 
