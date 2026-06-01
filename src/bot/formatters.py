@@ -157,15 +157,16 @@ def format_history(day_groups: list) -> str:
     lines = ["📜 <b>История ставок</b>\n"]
     for day_label, items in day_groups:
         settled = [x for x in items if x["settled"]]
-        won_cnt = sum(1 for x in settled if x["won"])
-        lost_cnt = sum(1 for x in settled if not x["won"])
+        won_cnt = sum(1 for x in settled if x["won"] is True)
+        lost_cnt = sum(1 for x in settled if x["won"] is False)
+        push_cnt = sum(1 for x in settled if x["won"] is None)
         pending_cnt = sum(1 for x in items if not x["settled"])
         day_profit = sum(x.get("profit", 0.0) or 0.0 for x in settled)
 
         profit_str = f"{'+' if day_profit >= 0 else ''}{day_profit:.2f} ед."
         stats_parts = []
         if won_cnt or lost_cnt:
-            stats_parts.append(f"✅ {won_cnt}  ❌ {lost_cnt}")
+            stats_parts.append(f"✅ {won_cnt}  ❌ {lost_cnt}" + (f"  ➖ {push_cnt}" if push_cnt else ""))
         if pending_cnt:
             stats_parts.append(f"⏳ {pending_cnt}")
         if settled:
@@ -175,7 +176,14 @@ def format_history(day_groups: list) -> str:
         lines.append(f"\n<b>📅 {day_label}</b>  {stats}")
 
         for it in items:
-            icon = "⏳" if not it["settled"] else ("✅" if it["won"] else "❌")
+            if not it["settled"]:
+                icon = "⏳"
+            elif it["won"] is None:
+                icon = "➖"  # push — stake returned
+            elif it["won"]:
+                icon = "✅"
+            else:
+                icon = "❌"
             h, a = it["home_abbr"], it["away_abbr"]
             hr, ar = it.get("home_runs"), it.get("away_runs")
             score = f"{h} {hr}:{ar} {a}" if (hr is not None and ar is not None) else f"{h} vs {a}"

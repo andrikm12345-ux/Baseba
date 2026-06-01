@@ -909,18 +909,22 @@ async def broadcast_results_summary(bot: Bot) -> None:
                         if t:
                             team_cache[tid] = t
 
-    won = [s for s in rows if s.won]
-    lost = [s for s in rows if not s.won]
+    won = [s for s in rows if s.won is True]
+    lost = [s for s in rows if s.won is False]
+    pushed = [s for s in rows if s.won is None]
+    # ROI denominator excludes pushes (stake returned, neutral)
+    staked_rows = [s for s in rows if s.won is not None]
     total_profit = sum(s.profit_units or 0.0 for s in rows)
-    roi = (total_profit / len(rows) * 100) if rows else 0.0
+    roi = (total_profit / len(staked_rows) * 100) if staked_rows else 0.0
 
     date_label = f"{yesterday_msk.day} {_MONTHS_RU[yesterday_msk.month]}"
     profit_emoji = "📈" if total_profit >= 0 else "📉"
     profit_sign = "+" if total_profit >= 0 else ""
 
+    push_str = f"  ➖ Пуш: {len(pushed)}" if pushed else ""
     lines = [
         f"📊 <b>Итоги {date_label}</b>\n",
-        f"✅ Выиграно: {len(won)}  ❌ Проиграно: {len(lost)}",
+        f"✅ Выиграно: {len(won)}  ❌ Проиграно: {len(lost)}{push_str}",
         f"{profit_emoji} Профит: {profit_sign}{total_profit:.2f} ед.  (ROI {profit_sign}{roi:.1f}%)\n",
     ]
 
@@ -933,7 +937,12 @@ async def broadcast_results_summary(bot: Bot) -> None:
         h = (ht.short_name or ht.name.split()[-1]) if ht else "?"
         a = (at.short_name or at.name.split()[-1]) if at else "?"
 
-        icon = "✅" if s.won else "❌"
+        if s.won is None:
+            icon = "➖"
+        elif s.won:
+            icon = "✅"
+        else:
+            icon = "❌"
         score = f"{m.home_runs}:{m.away_runs}" if m.home_runs is not None else "–:–"
         mkt = MARKET_LABELS.get(s.market, s.market)
         ln = getattr(s, "line", None)
