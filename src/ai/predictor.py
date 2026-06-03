@@ -57,8 +57,8 @@ async def _db_cache_put(match_id: int, payload: dict) -> None:
 
 SYSTEM_PROMPT = (
     "Ты — профессиональный бейсбольный аналитик-квант. "
-    "Твоя задача — не найти ставку, а решить: есть ли реальный перевес или нет. "
-    "В большинстве игр перевеса нет — это нормальный ответ. "
+    "Твоя задача — не «найти ставку», а оценить наличие реального перевеса и решить: ставить или пропускать. "
+    "В большинстве игр перевеса нет — это нормальный ответ. Если сигнал слабый/неопределённый — всегда пропуск. "
     "Отвечай ТОЛЬКО валидным JSON без markdown, без пояснений вне JSON. "
     "Формат строго: "
     '{"market":"...","pick":"...","line":X.X,"confidence":0.XX,"reasoning":"..."}'
@@ -66,56 +66,46 @@ SYSTEM_PROMPT = (
 
 
 _PROMPT = """\
-## МАТЧ
-{home} (хозяева) vs {away} (гости) | MLB
-
-## СТАРТОВЫЕ ПИТЧЕРЫ (официальная БД MLB)
-{home}: {home_pitcher_name} — ERA {home_era}, WHIP {home_whip}, K/9 {home_k9}, BB/9 {home_bb9}
-{away}: {away_pitcher_name} — ERA {away_era}, WHIP {away_whip}, K/9 {away_k9}, BB/9 {away_bb9}
-
-## ФОРМА (наша БД)
-{home}: {home_w10}/{home_g10} побед за 10 игр, {home_avg_runs} ранов/игру
-{away}: {away_w10}/{away_g10} побед за 10 игр, {away_avg_runs} ранов/игру
-H2H сезона ({h2h_games} игр): {home} {h2h_home_wins}–{h2h_away_wins} {away}
-{web_block}
-## КОТИРОВКИ БУКМЕКЕРОВ + ВЕРОЯТНОСТЬ РЫНКА (no-vig)
-Колонка «рынок%» — честная вероятность рынка БЕЗ маржи.
-
+ДАННЫЕ (вход уже подставлен):
+МАТЧ: {home} vs {away} | MLB
+СТАРТОВЫЕ ПИТЧЕРЫ (ERA/WHIP/K/9/BB/9):
+- {home}: {home_pitcher_name} — ERA {home_era}, WHIP {home_whip}, K/9 {home_k9}, BB/9 {home_bb9}
+- {away}: {away_pitcher_name} — ERA {away_era}, WHIP {away_whip}, K/9 {away_k9}, BB/9 {away_bb9}
+ФОРМА (наша БД):
+- {home}: {home_w10}/{home_g10} побед, {home_avg_runs} ранов/игру
+- {away}: {away_w10}/{away_g10} побед, {away_avg_runs} ранов/игру
+- H2H сезона ({h2h_games} игр): {home} {h2h_home_wins}–{h2h_away_wins} {away}
+{web_block}КОТИРОВКИ (с no-vig вероятностями):
 {quotes_table}
 
-## КАК ПРИНИМАТЬ РЕШЕНИЕ
+ПРАВИЛО РЕШЕНИЯ (строго):
+1) Считай, что "рынок уже учёл очевидное". Ставка допускается только если есть ВЕСОМЫЙ FACTOR, который рынок НЕ дооценил.
+2) Если для сравнения ключевых метрик отсутствуют значения (например, н/д у питчеров) — treat как "нет сигнала".
+3) ТОЛЬКО следующие Fact-критерии дают шанс на сигнал:
+   - Критерий A (качественная разница стартеров): |ERA_home - ERA_away| > 2.0
+   - Критерий B (элита vs слабый): один питчер ERA < 2.80 и WHIP < 1.05, другой ERA > 5.50
+   - Критерий C (перекос по цене/рынку): команда в форме выиграла 8–10 из 10, и при этом её кэф (из ML) > 2.10, и рынок не отреагировал
+   - Критерий D (стадион + слабые питчеры для тотала): Coors Field и оба ERA > 4.50 → OVER
+4) Что НЕ даёт перевеса: ERA разница < 2.0; "в хорошей форме" без цифр; один питчер чуть лучше; интуиция.
+5) Оценка "реального перевеса":
+   - Рассчитай P_exp строго по критериям A/B/C/D. Без них P_exp ≈ 0.50 и сигнала нет.
+   - Возьми P_mkt из no-vig для выбранного рынка/стороны.
+   - Сигнал = P_exp >= 0.65 И |P_exp - P_mkt| >= 0.08.
+   - Иначе — пропуск (confidence 0.50).
+6) Приоритет рынков при нескольких сигналах: ML > RUN_LINE > TOTAL. При равной уверенности — максимальный |P_exp - P_mkt|.
+7) Confidence:
+   - P_exp >= 0.75 → confidence 0.80–0.90
+   - 0.65 <= P_exp < 0.75 → confidence 0.65–0.74
+   - Нет сигнала → confidence 0.50
 
-Рынок уже учёл очевидное. Ты ставишь ТОЛЬКО если есть факт, который рынок НЕ дооценил.
+ФОРМАТ ОТВЕТА (ТОЛЬКО валидный JSON, reasoning одной строкой):
+- ML: market="ML", pick="HOME" или "AWAY", line=null
+- Тотал: market="TOTAL", pick="OVER" или "UNDER", line=X.X (из данных)
+- Фора: market="RUN_LINE", pick="HOME" или "AWAY" (чья фора −line), line=Y.Y (из данных)
+- reasoning: 1–2 Fact-критерия с числами (ERA/WHIP/расхождение P_exp−P_mkt)
 
-Что даёт реальный перевес:
-- ERA разница > 2.0 между стартерами
-- Один питчер элита (ERA < 2.80, WHIP < 1.05), другой слабый (ERA > 5.50)
-- Команда выиграла 8–10 из 10, кэф > 2.10 (рынок не отреагировал)
-- Coors Field + оба питчера ERA > 4.50 → OVER на большой линии
-
-Что НЕ даёт перевеса (не ставь):
-- ERA разница < 2.0
-- «Команда в хорошей форме» без цифр
-- Один питчер чуть лучше
-- Интуиция
-- Неизвестные питчеры (н/д) = нет сигнала
-
-## РЕШЕНИЕ
-
-Есть КОНКРЕТНЫЙ факт из списка выше?
-- Если ДА и уверен ≥ 65% → выбери рынок, расхождение ≥ 8%
-- Если сомневаешься → confidence: 0.50 (пропуск)
-
-БОЛЬШИНСТВО игр (7–8 из 10) должны получить пропуск.
-
-## ФОРМАТ — ТОЛЬКО JSON
-Сигнал: {{"market":"ML","pick":"HOME","line":null,"confidence":0.68,"reasoning":"ERA хозяев 2.8 vs гостей 5.4, разница 2.6"}}
-Пропуск: {{"market":"ML","pick":"HOME","line":null,"confidence":0.50,"reasoning":"ERA разница 0.4, нет перевеса"}}
-
-market: "ML" | "TOTAL" | "RL"
-pick: ML→"HOME"|"AWAY"; TOTAL→"OVER"|"UNDER"; RL→"COVER"(хозяева −линия)|"AWAY_COVER"(гости −линия)
-line: для TOTAL и RL — точная линия из таблицы; для ML — null
-confidence: 0.50 = пропуск, 0.65–0.90 = сигнал\
+Пример сигнала: {{"market":"ML","pick":"HOME","line":null,"confidence":0.70,"reasoning":"ERA хозяев 2.5 vs гостей 5.8, разница 3.3, критерий A+B, P_exp=0.70 vs рынок 0.58"}}
+Пример пропуска: {{"market":"ML","pick":"HOME","line":null,"confidence":0.50,"reasoning":"ERA разница 0.4, нет критериев A/B/C/D"}}\
 """
 
 
@@ -239,9 +229,24 @@ _VALID_PICKS = {
 }
 
 
+def _normalize_market(d: dict) -> None:
+    """Normalize Claude's output format to internal format.
+
+    Claude prompt uses RUN_LINE/HOME/AWAY for run line;
+    internal code uses RL/COVER/AWAY_COVER.
+    """
+    if d.get("market") == "RUN_LINE":
+        d["market"] = "RL"
+        if d.get("pick") == "HOME":
+            d["pick"] = "COVER"
+        elif d.get("pick") == "AWAY":
+            d["pick"] = "AWAY_COVER"
+
+
 def _validate_pick(d: dict) -> bool:
     if not isinstance(d, dict):
         return False
+    _normalize_market(d)
     market = d.get("market")
     pick = d.get("pick")
     confidence = d.get("confidence")
