@@ -79,7 +79,7 @@ def _ai_to_signal(ai_result: dict, match_id: int, odds: dict) -> Signal | None:
     pick = ai_result.get("pick")
     confidence = float(ai_result.get("confidence", 0.0))
     line = ai_result.get("line")
-    if not market or not pick or confidence < 0.62:
+    if not market or not pick or confidence < 0.65:
         return None
 
     book: float = 0.0
