@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     tavily_api_key: Optional[str] = None
     leagues: list[str] = ["mlb"]
     database_url: Optional[str] = None
-    min_edge: float = 0.08          # min divergence vs market no-vig probability (all markets)
+    min_edge: float = 0.06          # min divergence vs market no-vig probability (all markets)
     min_odds: float = 1.90
     max_odds: float = 4.50
     max_signals_per_day: int = 3    # daily cap — publish only top-N by edge
