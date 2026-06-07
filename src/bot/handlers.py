@@ -549,6 +549,14 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext):
             "(или /cancel чтобы отменить)"
         )
         await cb.answer()
+    elif action == "clear_ai_cache":
+        from src.ai.predictor import _cache
+        from src.data.database import AiPrediction
+        _cache.clear()
+        async with SessionLocal() as session:
+            await session.execute(delete(AiPrediction))
+            await session.commit()
+        await cb.answer("✅ AI-кэш очищен. Следующий цикл пересмотрит все игры.", show_alert=True)
     elif action == "close":
         await cb.message.delete()
         await cb.answer()

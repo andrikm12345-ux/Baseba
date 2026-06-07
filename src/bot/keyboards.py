@@ -37,6 +37,9 @@ def admin_menu(leads_count: int = 0, ai_on: bool = False) -> InlineKeyboardMarku
             InlineKeyboardButton(text=ai_label, callback_data="admin:ai_toggle"),
         ],
         [
+            InlineKeyboardButton(text="🗑 Очистить AI-кэш", callback_data="admin:clear_ai_cache"),
+        ],
+        [
             InlineKeyboardButton(text="🔙 Закрыть", callback_data="admin:close"),
         ],
     ])

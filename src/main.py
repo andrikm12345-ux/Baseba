@@ -41,6 +41,7 @@ _ADMIN_COMMANDS = _USER_COMMANDS + [
     BotCommand(command="test_odds", description="📡 Тест Odds API"),
     BotCommand(command="digest_now", description="📤 Разослать дайджест"),
     BotCommand(command="purge_signals", description="🗑 Очистить сигналы"),
+    BotCommand(command="clear_ai_cache", description="🧹 Сбросить AI-кэш"),
     BotCommand(command="allow", description="✅ Выдать доступ по ID"),
     BotCommand(command="deny", description="⛔ Забрать доступ по ID"),
 ]
