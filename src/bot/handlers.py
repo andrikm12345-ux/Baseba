@@ -454,6 +454,20 @@ async def cmd_admin(msg: Message):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+@router.message(Command("clear_ai_cache"))
+async def cmd_clear_ai_cache(msg: Message):
+    """Clear AI prediction cache so all games are re-analyzed with updated prompt."""
+    if not is_admin(msg.from_user.id):
+        return
+    from src.ai.predictor import _cache
+    from src.data.database import AiPrediction, SessionLocal
+    _cache.clear()
+    async with SessionLocal() as session:
+        await session.execute(delete(AiPrediction))
+        await session.commit()
+    await msg.answer("✅ AI-кэш очищен. Следующий цикл пересмотрит все игры заново.")
+
+
 @router.message(Command("purge_signals"))
 async def cmd_purge_signals(msg: Message):
     """Delete no-odds signals (book_odds=0) for unsettled future games.
